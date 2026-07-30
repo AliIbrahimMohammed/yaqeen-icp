@@ -1,0 +1,50 @@
+[package]
+name = "title_verification"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-ff = "0.4"
+ark-ec = "0.4"
+ark-bls12-381 = "0.4"
+ark-groth16 = "0.4"
+ark-relations = "0.4"
+ark-r1cs-std = "0.4"
+ark-crypto-primitives = { version = "0.4", features = ["r1cs", "sponge"] }
+ark-std = "0.4"
+ark-serialize = "0.4"
+ark-snark = "0.4"
+rand = "0.8"
+rand_chacha = "0.3"
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
+
+[[bin]]
+name = "prove"
+path = "src/bin/prove.rs"
+
+[[bin]]
+name = "verify_smoke"
+path = "src/bin/verify_smoke.rs"
+
+[[bin]]
+name = "wire_export"
+path = "src/bin/wire_export.rs"
+
+[[bin]]
+name = "export_poseidon_params"
+path = "src/bin/export_poseidon_params.rs"
+
+[[bin]]
+name = "prove_live"
+path = "src/bin/prove_live.rs"
+
+[[bin]]
+name = "prove_live2"
+path = "src/bin/prove_live2.rs"
+
+[lib]
+name = "title_verification"
+path = "src/lib.rs"

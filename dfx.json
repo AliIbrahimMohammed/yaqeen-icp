@@ -1,0 +1,18 @@
+{
+  "canisters": {
+    "title_registry": {
+      "type": "motoko",
+      "main": "motoko/src/main.mo"
+    },
+    "verify_test": {
+      "type": "motoko",
+      "main": "verify_test/main.mo"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": "bash ./package_flags.sh"
+    }
+  },
+  "version": 1
+}

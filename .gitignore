@@ -1,0 +1,6 @@
+circuit/target/
+circuit/proving_key.bin
+circuit/verifying_key.bin
+circuit/prove_live2_output.json
+.dfx/
+NUL
