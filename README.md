@@ -1,11 +1,23 @@
 # Yaqeen on ICP — Motoko + Groth16 + Poseidon
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust: arkworks](https://img.shields.io/badge/Rust-arkworks-blue)](#)
+[![Motoko](https://img.shields.io/badge/Motoko-ICP-orange)](#)
+
 Porting Yaqeen's title-verification statement (ownership, no liens, valid
 license, via Merkle inclusion) from Noir/Barretenberg/BN254 onto the
 Internet Computer, following the architecture demonstrated in
 `Shielded-Ledger-Hivemind`: proofs generated client-side, verified natively
 inside a Motoko canister, no bridge, no off-chain trust assumption on the
 verifier.
+
+## Contributing
+
+This is an open-source project — contributions are welcome. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md) for the project map, build instructions,
+and the house rules on verifying cryptographic changes. Report security
+issues privately via [SECURITY.md](SECURITY.md), never in a public issue.
+
 
 ## Status
 
@@ -304,11 +316,19 @@ restructuring `ark_groth16::verifier::prepare_verifying_key` /
 4. **Cost/latency optimization pass**, given the ~20.9B-instruction,
    ~3-DTS-round verify cost measured above, if per-user verification volume
    will be non-trivial.
-5. **Mainnet deployment dry run** (cycles budgeting, subnet selection,
-   canister settings) once the ceremony and admin model above are in place.
+5. **Mainnet deployment dry run** (cycles budgeting, subnet selection,   canister settings) once the ceremony and admin model above are in place.
 6. **Re-run the dfx/pocket-ic tests from a machine with dfx access** to
    corroborate this session's claims with a second, independent run —
    this review could not do that part. `circuit/src/bin/verify_prove2`
    (new) covers the pure-cryptography half of that gap in the meantime;
    it does not touch the canister/replica layer at all.
+
+## License and attribution
+
+Licensed under the [MIT License](LICENSE). The Groth16 verifier under
+`motoko/src/groth16/vendor/` is vendored from
+[Shielded-Ledger-Hivemind](https://github.com/Menese-Protocol/Shielded-Ledger-Hivemind)
+(MIT, Copyright (c) 2026 Menese DeFi Team) — see
+`motoko/src/groth16/vendor/ATTRIBUTION.md`. Contributions to this repository
+are made under the MIT License unless otherwise agreed.
 
