@@ -48,3 +48,7 @@ path = "src/bin/verify_prove2.rs"
 [lib]
 name = "title_verification"
 path = "src/lib.rs"
+
+[[bin]]
+name = "oracle_alphabeta"
+path = "src/bin/oracle_alphabeta.rs"

@@ -10,16 +10,29 @@
 ///   - `CurveJac`: inversion-free vk_x public-input MSM and `[r]P` subgroup checks (the pieces
 ///     the g10d projection EXCLUDED — included here so the fit verdict is honest).
 ///
-/// The three fixed verifying-key G2 points (beta/gamma/delta) are prepared ONCE via `prepareVk`,
-/// outside the per-proof message; only the proof's B is prepared per proof. −alpha is negated once.
+/// The two fixed verifying-key G2 points (gamma/delta) are prepared ONCE via `prepareVk`,
+/// outside the per-proof message; only the proof's B is prepared per proof.
 ///
-/// Verify equation (arkworks convention, product form):
-///   e(A,B) · e(−vk_x, γ) · e(−C, δ) · e(−α, β) == 1,   vk_x = γ_abc[0] + Σ inputᵢ·γ_abc[i+1]
+/// alpha/beta precompute (matches `ark_groth16::verifier::prepare_verifying_key` /
+/// `verify_proof_with_prepared_inputs` upstream exactly): e(alpha,beta) never changes once the
+/// vk is fixed, so instead of folding a 4th (−alpha,beta) pair into every per-proof Miller loop,
+/// `prepareVk` computes `alphaBetaTarget = finalExp(e(alpha,beta))` ONCE and every verify only
+/// interleaves the THREE pairs that actually depend on the proof/public inputs. Validated
+/// algebraically (a bilinearity identity, not an approximation) against arkworks itself in
+/// `circuit/src/bin/oracle_alphabeta.rs`: old 4-pair-product==1 and new
+/// 3-pair-vs-precomputed-target forms agree on a valid proof and four forgery classes (tampered
+/// public input, tampered A, tampered C, wrong vk).
+///
+/// Verify equation (arkworks convention):
+///   e(A,B) · e(−vk_x, γ) · e(−C, δ) == e(α, β),   vk_x = γ_abc[0] + Σ inputᵢ·γ_abc[i+1]
 ///
 /// Correctness boundary (Groth16MultiTest.mo): the raw multi-Miller Fp12 and the shared final
 /// exponentiation are byte-diffed on ALL 12 coefficients against the arkworks multimilleroracle
 /// — for the VALID proof and for a FORGED one (non-trivial target) — and the assembled verify
-/// must accept the valid proof and reject all four forgery classes.
+/// must accept the valid proof and reject all four forgery classes. NOTE: that byte-diff gate
+/// pins the OLD 4-pair intermediate value; after this change it must be re-pinned against the
+/// NEW 3-pair intermediate (a real, differently-shaped value) before this lands on the
+/// production path — see README "alpha/beta precompute" section.
 
 import List "mo:core/List";
 import Runtime "mo:core/Runtime";
@@ -39,8 +52,7 @@ module {
   public type Verdict = { #ok; #err : Text };
 
   public type PreparedVk = {
-    alphaNeg : C.G1;
-    betaPrep : PP.G2Prepared;
+    alphaBetaTarget : TM.Fp12M; // finalExp(e(alpha,beta)), computed once in prepareVk
     gammaPrep : PP.G2Prepared;
     deltaPrep : PP.G2Prepared;
     gammaAbc : [C.G1];
@@ -77,9 +89,13 @@ module {
     for (p in gammaAbc.vals()) {
       switch (validateG1Flat(z, p)) { case (?e) { return #err("gamma_abc:" # e) }; case null {} };
     };
+    // Runs once, at vk registration — this is genuinely outside the per-proof budget, unlike
+    // the old approach of re-pairing alpha/beta on every single verify call.
+    let alphaBetaTarget = PF.finalExponentiate(
+      multiMillerLoopPrepared([(alpha, PP.prepareG2(beta))])
+    );
     #ok({
-      alphaNeg = C.g1Neg(alpha);
-      betaPrep = PP.prepareG2(beta);
+      alphaBetaTarget;
       gammaPrep = PP.prepareG2(gamma);
       deltaPrep = PP.prepareG2(delta);
       gammaAbc;
@@ -125,14 +141,14 @@ module {
     if (PP.X_IS_NEGATIVE) { TM.fp12Conj(f) } else { f };
   };
 
-  /// The raw four-pair Groth16 Miller product, before the shared final exponentiation.
-  /// Exposed separately so the gate can byte-diff this exact intermediate against the oracle.
+  /// The raw THREE-pair Groth16 Miller product (alpha/beta excluded — see module doc), before
+  /// the shared final exponentiation. Exposed separately so the gate can byte-diff this exact
+  /// intermediate against the oracle.
   public func multiMillerRaw(vk : PreparedVk, a : C.G1, bPrep : PP.G2Prepared, c : C.G1, vkx : C.G1) : TM.Fp12M {
     multiMillerLoopPrepared([
       (a, bPrep),
       (C.g1Neg(vkx), vk.gammaPrep),
       (C.g1Neg(c), vk.deltaPrep),
-      (vk.alphaNeg, vk.betaPrep),
     ]);
   };
 
@@ -151,11 +167,14 @@ module {
   //   0     G1 subgroup scratch point (36)      36    G2 subgroup scratch point (72)
   //   108   A affine Mont px/py (24)            132   −C affine Mont px/py (24)
   //   156   vk_x Jacobian (36)                  192   −vk_x affine Mont px/py (24)
-  //   216   alphaNeg affine Mont px/py (24)     240   B affine Mont (48)
+  //   216   (unused — was alphaNeg; alpha/beta   240   B affine Mont (48)
+  //         is precomputed in flat.alphaBetaTarget, not paired here anymore)
   //   288   Miller f (144)                      432   final-exp output (144)
   //   576   MSM accumulator Jacobian (36)       612   MSM point / conversion spare (36)
   //   648   B prepared (4896)
-  //   (beta/gamma/delta prepared limbs live in the FlatVk cache arrays, not the arena)
+  //   8640  loaded flat.alphaBetaTarget, 144 limbs — copied in fresh each call so `s` and every
+  //         offset below 8640 is untouched by this change
+  //   (gamma/delta prepared limbs live in the FlatVk cache arrays, not the arena)
   let ARENA_S : Nat = 5544;
 
   func loadG1AffineMont(z : [var Nat32], d : Nat, p : { x : Nat; y : Nat }) {
@@ -171,9 +190,11 @@ module {
   /// invalidated at every vk write site and wiped by upgrades — it is a pure deterministic
   /// function of the PreparedVk, never persisted.
   public type FlatVk = {
-    beta : [var Nat32];
     gamma : [var Nat32];
     delta : [var Nat32];
+    // Fp12 alphaBetaTarget in flat Montgomery limbs (144 limbs), so the comparison at the end
+    // of `verifyWithFlat` never has to allocate/convert from the record form per proof.
+    alphaBetaTarget : [var Nat32];
   };
 
   func prepToLimbs(prep : PP.G2Prepared) : [var Nat32] {
@@ -194,13 +215,34 @@ module {
     out
   };
 
+  /// Load an already-Montgomery-form Fp12M record into 144 flat limbs, in the exact nested
+  /// order TowerFlat.mo's layout expects (c0.c0.c0, c0.c0.c1, c0.c1.c0, ... c1.c2.c1). Plain
+  /// `FF.fromNat` — no `toMontInto` — because the record's Nats are already Montgomery-form
+  /// (TowerMont.mo's own documented element convention), and `fromNat` is representation-neutral.
+  func fp12MToFlat(x : TM.Fp12M) : [var Nat32] {
+    let out = VarArray.repeat<Nat32>(0, 144);
+    FF.fromNat(x.c0.c0.c0, out, 0);
+    FF.fromNat(x.c0.c0.c1, out, 12);
+    FF.fromNat(x.c0.c1.c0, out, 24);
+    FF.fromNat(x.c0.c1.c1, out, 36);
+    FF.fromNat(x.c0.c2.c0, out, 48);
+    FF.fromNat(x.c0.c2.c1, out, 60);
+    FF.fromNat(x.c1.c0.c0, out, 72);
+    FF.fromNat(x.c1.c0.c1, out, 84);
+    FF.fromNat(x.c1.c1.c0, out, 96);
+    FF.fromNat(x.c1.c1.c1, out, 108);
+    FF.fromNat(x.c1.c2.c0, out, 120);
+    FF.fromNat(x.c1.c2.c1, out, 132);
+    out
+  };
+
   /// Convert a PreparedVk's fixed pairs to flat limb arrays — run once per vk registration
   /// (or once per post-upgrade lazy rebuild), never per proof.
   public func prepareFlatVk(vk : PreparedVk) : FlatVk {
     {
-      beta = prepToLimbs(vk.betaPrep);
       gamma = prepToLimbs(vk.gammaPrep);
       delta = prepToLimbs(vk.deltaPrep);
+      alphaBetaTarget = fp12MToFlat(vk.alphaBetaTarget);
     }
   };
 
@@ -215,8 +257,15 @@ module {
   public func verifyWithFlat(vk : PreparedVk, flat : FlatVk, a : C.G1, b : C.G2, c : C.G1, inputs : [Nat]) : Verdict {
     if (vk.gammaAbc.size() != inputs.size() + 1) { return #err("E_BAD_LENGTH") };
 
-    let z = VarArray.repeat<Nat32>(0, 8640); // ARENA_S + PairingFlat scratch (5544 + 3096)
+    // ARENA_S + PairingFlat scratch (5544 + 3096) + 144 trailing limbs for the loaded
+    // alphaBetaTarget (offset TARGET_OFF below) — everything at offset < 8640 is unchanged
+    // from before this pair was dropped, so `s` (the PairingFlat scratch base) still means
+    // exactly what it meant before.
+    let z = VarArray.repeat<Nat32>(0, 8784);
     let s = ARENA_S;
+    let TARGET_OFF : Nat = 8640;
+    var k = 0;
+    while (k < 144) { z[TARGET_OFF + k] := flat.alphaBetaTarget[k]; k += 1 };
 
     // A/B/C validation — same order and codes as CJ.g1Validate/g2Validate (canonical and
     // on-curve halves are the unchanged L1/L2 predicates; the [r]P subgroup half is flat).
@@ -235,8 +284,8 @@ module {
       i += 1;
     };
 
-    // Pair schedule (order identical to multiMillerRaw):
-    //   0: (A, B)   1: (−vk_x, gamma)   2: (−C, delta)   3: (alphaNeg, beta)
+    // Pair schedule (order identical to multiMillerRaw — see the 3-pair note below):
+    //   0: (A, B)   1: (−vk_x, gamma)   2: (−C, delta)
     var liveA = false;
     switch (a) {
       case (#inf) {};
@@ -273,27 +322,24 @@ module {
         liveC := true;
       };
     };
-    var liveAlpha = false;
-    switch (vk.alphaNeg) {
-      case (#inf) {};
-      case (#pt(p)) { loadG1AffineMont(z, 216, p); liveAlpha := true };
-    };
-    let liveBeta = flat.beta.size() != 0;
     let liveGamma = flat.gamma.size() != 0;
     let liveDelta = flat.delta.size() != 0;
 
+    // Pair schedule (order identical to multiMillerRaw, now 3 pairs — alpha/beta is precomputed
+    // in vk.alphaBetaTarget / flat.alphaBetaTarget instead of paired here):
+    //   0: (A, B)   1: (−vk_x, gamma)   2: (−C, delta)
     PFl.multiMillerInto(
       z,
       288,
-      [liveA and liveB, liveVkx and liveGamma, liveC and liveDelta, liveAlpha and liveBeta],
-      [108, 192, 132, 216],
-      [120, 204, 144, 228],
-      [z, flat.gamma, flat.delta, flat.beta],
-      [648, 0, 0, 0],
+      [liveA and liveB, liveVkx and liveGamma, liveC and liveDelta],
+      [108, 192, 132],
+      [120, 204, 144],
+      [z, flat.gamma, flat.delta],
+      [648, 0, 0],
       s,
     );
     PFl.finalExponentiateInto(z, 432, 288, s);
-    if (TFl.fp12IsOneMont(z, 432)) { #ok } else { #err("E_PAIRING_FAIL") };
+    if (TFl.fp12Eq(z, 432, TARGET_OFF)) { #ok } else { #err("E_PAIRING_FAIL") };
   };
 
   /// The ORIGINAL record-based assembly, kept verbatim as the differential anchor for the flat
@@ -309,7 +355,7 @@ module {
     let bPrep = PP.prepareG2(b);
     let raw = multiMillerRaw(vk, a, bPrep, c, vkx);
     let out = PF.finalExponentiate(raw);
-    if (TM.fp12Eq(out, TM.fp12OneM())) { #ok } else { #err("E_PAIRING_FAIL") };
+    if (TM.fp12Eq(out, vk.alphaBetaTarget)) { #ok } else { #err("E_PAIRING_FAIL") };
   };
 
   func bitLen(n : Nat) : Nat {

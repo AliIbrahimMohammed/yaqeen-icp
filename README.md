@@ -239,6 +239,32 @@ Wire-format compatibility was confirmed by reading source, not assumed:
 against what the vendored `Groth16Wire.parseProof` / `parseAndPrepareVk` /
 `parseInputs` expect.
 
+## alpha/beta precompute (patch)
+
+`Groth16Multi.mo` was patched to stop re-pairing the constant `(α,β)` pair on
+every verify call: `prepareVk` now computes `alphaBetaTarget = finalExp(e(α,β))`
+once at VK-registration time, and each verify interleaves only the **three**
+proof-dependent pairs, checking `e(A,B)·e(−vk_x,γ)·e(−C,δ) == alphaBetaTarget`
+instead of the old four-pair-product-equals-1 form. This is the same
+restructuring `ark_groth16::verifier::prepare_verifying_key` /
+`verify_proof_with_prepared_inputs` does upstream.
+
+- The algebraic equivalence was validated against arkworks itself on a real
+  BLS12-381 keypair+proof in `circuit/src/bin/oracle_alphabeta.rs` — old and
+  new forms agree on a valid proof and on all four forgery classes (tampered
+  public input, tampered `A`, tampered `C`, wrong VK), and match arkworks' own
+  `verify_proof` verdict. Run with `cd circuit && cargo run --release --bin
+  oracle_alphabeta`.
+- No caller changed: `PreparedVk`/`FlatVk` are opaque to `Groth16Wire.mo`,
+  `TitleGroth16.mo`, and `main.mo`. Typecheck (moc vs real motoko-base/core) is
+  clean, 0 errors.
+- Not re-measured here: the instruction-count delta on a real replica (the
+  ~20.9B figure predates this patch; expect a real but partial reduction, one
+  fewer pairing out of four). The `Groth16MultiTest.mo` byte-diff gate pins the
+  OLD 4-pair intermediate and must be re-pinned against the new 3-pair value
+  before this lands on the production path. See
+  `PATCH_NOTES-alphabeta-precompute.md` for the full boundary.
+
 ## What's honestly still unconfirmed, and why
 
 - **No real multi-party trusted-setup ceremony.** `circuit/src/bin/setup.rs`
