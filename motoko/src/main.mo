@@ -32,7 +32,7 @@ persistent actor TitleRegistry {
   // the text representation (avoids relying on `**` overflow semantics).
   func natHash(n : Nat) : Nat32 { Text.hash(Nat.toText(n)) };
 
-  let admin : Principal = Principal.fromText("vp4bf-6jv5x-pn6wm-5fbcw-ylfli-jxu53-pyvhx-7l3xk-prod7-omusl-sqe"); // TODO: set at init — TEMP for local testing, revert before commit
+  let admin : Principal = Principal.fromText("aaaaa-aa"); // TODO: set at init
   let treeDepth : Nat = 25;
 
   // ---- registry state ----

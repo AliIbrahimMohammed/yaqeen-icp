@@ -216,21 +216,22 @@ module {
     // always 0 at the start of each call in our single-shot usage (we only
     // ever call hash() once per logical absorb, matching how the circuit's
     // poseidon_hash always constructs a fresh sponge).
+    //
+    // Chunk boundaries are computed via addition/comparison only (never
+    // `n - offset`), so there's no Nat subtraction for the compiler to flag
+    // as a possible trap in the first place — cleaner than suppressing a
+    // (correct) M0155 warning with a comment.
     var offset = 0;
     let n = all.size();
     while (offset < n) {
-      // `n - offset` cannot trap: the while-guard above already establishes
-      // offset < n, so this subtraction never underflows. The Motoko
-      // compiler's M0155 warning here is a known false positive for this
-      // loop shape (it can't see the guard's implication) — not a real bug.
-      let remaining = n - offset;
-      if (remaining <= RATE) {
+      let isLastChunk = offset + RATE >= n;
+      if (isLastChunk) {
         var i = 0;
-        while (i < remaining) {
+        while (offset + i < n) {
           state[CAPACITY + i] := addMod(state[CAPACITY + i], all[offset + i]);
           i += 1;
         };
-        offset += remaining;
+        offset := n;
       } else {
         var i = 0;
         while (i < RATE) {

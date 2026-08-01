@@ -42,8 +42,8 @@ name = "prove_live"
 path = "src/bin/prove_live.rs"
 
 [[bin]]
-name = "prove_live2"
-path = "src/bin/prove_live2.rs"
+name = "verify_prove2"
+path = "src/bin/verify_prove2.rs"
 
 [lib]
 name = "title_verification"
