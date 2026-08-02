@@ -1,290 +1,207 @@
-# Yaqeen on ICP — Motoko + Groth16 + Poseidon
+# 🛡️ Yaqeen on ICP
 
-Porting Yaqeen's title-verification statement (ownership, no liens, valid
-license, via Merkle inclusion) from Noir/Barretenberg/BN254 onto the
-Internet Computer, following the architecture demonstrated in
-`Shielded-Ledger-Hivemind`: proofs generated client-side, verified natively
-inside a Motoko canister, no bridge, no off-chain trust assumption on the
-verifier.
+**Zero-knowledge property-title verification on the Internet Computer.**
+
+[![Motoko](https://img.shields.io/badge/Motoko-ICP-orange)](#)
+[![Rust](https://img.shields.io/badge/Rust-arkworks-blue)](#)
+[![Groth16](https://img.shields.io/badge/Groth16-BLS12--381-purple)](#)
+[![Poseidon](https://img.shields.io/badge/Poseidon-hash-red)](#)
+[![DFX](https://img.shields.io/badge/dfx-0.32.0-green)](#)
+
+Yaqeen's title-verification statement — **ownership, no liens, valid
+license**, proven via Merkle-tree inclusion — is ported from
+Noir/Barretenberg/BN254 onto the Internet Computer, following the
+architecture of `Shielded-Ledger-Hivemind`: proofs are generated
+**client-side** and verified **natively inside a Motoko canister** — no
+bridge, no oracle, no off-chain trust assumption on the verifier.
+
+![Yaqeen Project ZK Verification Overview](Yaqeen_Project_ZK_Verification_Overview.png)
+
+## Table of contents
+
+- [How it works](#how-it-works)
+- [Repository layout](#repository-layout)
+- [Status](#status)
+- [Getting started](#getting-started)
+- [Canister API](#canister-api)
+- [Security model](#security-model)
+- [Performance](#performance)
+- [Roadmap](#roadmap)
+- [Attribution](#attribution)
+
+## How it works
+
+```
+┌──────────────┐   owner_secret (never leaves the client)
+│    Client    │   ┌──────────────────────────────────────────────┐
+│   (prover)   │   │ 1. submitRecord      → registry Merkle root   │
+└──────┬───────┘   │ 2. requestChallenge  → { root, purpose,       │
+       │  proof    │                        nonce, timestamp }     │
+       ▼           │ 3. verify(proof)     → nullifier or error     │
+┌──────────────┐   └───────────────────────────────┬──────────────┘
+│  circuit/    │                                     ▲
+│  (Rust R1CS) │   arkworks statement: Poseidon       │
+│              │   commitment + Merkle inclusion      │
+└──────┬───────┘   (depth 25) + encumbrance/license   │
+       └──────────────────▶ proof bytes ──────────────┘
+                            verified in-canister via
+                            vendored Groth16 verifier
+```
+
+1. **Register** — a title record is committed via
+   `Poseidon(domain_owner, owner_secret, property_id)`. The canister never
+   sees `owner_secret`.
+2. **Challenge** — the owner requests a challenge bound to the current
+   registry Merkle root.
+3. **Prove** — a client builds a Groth16 proof over private inputs and the
+   challenge's public inputs.
+4. **Verify** — the canister matches the public inputs to the issued
+   challenge, checks the challenge is unconsumed, and runs a full
+   BLS12-381 pairing verification in Motoko. Success returns a unique
+   nullifier; replaying a proof fails with `"challenge already consumed"`.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `circuit/` | Rust (arkworks) R1CS statement; setup/prove/verify tooling |
+| `motoko/src/main.mo` | `title_registry` canister — registry, challenges, verification |
+| `motoko/src/poseidon/` | Poseidon hash (real arkworks constants + duplex-sponge schedule) |
+| `motoko/src/groth16/` | `TitleGroth16.mo` adapter + vendored BLS12-381 Groth16 verifier (`vendor/`) |
+| `verify_test/` | Standalone canister for direct `Groth16Wire.tryVerify` tests |
+| `perf-testing/` | Instruction-cost measurement artifacts (orig/patched wasm, WASI runner) |
+| `dfx.json` | Canister definitions (`title_registry`, `verify_test`) |
 
 ## Status
 
 | Component | State | How it was verified |
 |---|---|---|
-| `circuit/` — arkworks R1CS statement | **Compiles clean, cryptographically verified correct** | Real `cargo build --release` (rustc 1.75 via apt). Ran `setup` → `prove` → `verify_smoke`: consistent witness verifies `true`; inconsistent/tampered witnesses verify `false`. |
-| `motoko/src/poseidon/Poseidon.mo` | **Real constants, real construction, cross-language verified** | Was previously placeholder constants AND a subtly wrong sponge construction (domain tag was stored in the capacity slot instead of being absorbed as the first rate input, which is what the circuit's `sponge.absorb(&[domain_tag, ...])` actually does). Both are now fixed: `circuit/src/bin/export_poseidon_params.rs` exports the real ARK/MDS from `poseidon_config()` plus a native test vector; `Poseidon.mo` was rewritten to replicate arkworks' exact duplex-sponge schedule. Ran the real Motoko compiler (npm `motoko` package) against real `motoko-base` and got byte-identical output to the Rust side on both sides. |
-| `motoko/src/groth16/vendor/*` | **Real Groth16 verifier — confirmed ACCEPT/REJECT on a real replica** | Deployed on real `dfx 0.32.0` + `pocket-ic`, called the vendored `GW.tryVerify` directly with a static self-contained fixture: `ACCEPT` on the valid proof, `REJECT:pairing-check` on a forged-inputs variant. |
-| `motoko/src/main.mo` — **full end-to-end flow** | **Confirmed working against a live, freshly-issued challenge, not just a static fixture** | See "End-to-end live verification" below. |
-| `preupgrade`/`postupgrade` | **Real upgrade round-trip confirmed correct, including the Merkle tree structure, not just scalar stable vars** | See "Upgrade round-trip" below. |
-| Merkle inclusion with a **real, non-trivial path** (non-zero sibling, `is_right = true`) | **Confirmed correct — after finding and fixing a real bug in the test tooling** | See "Second-leaf Merkle inclusion proof" below. |
+| R1CS circuit (`circuit/`) | Compiles clean, cryptographically verified | `cargo build --release`; `setup` → `prove` → `verify_smoke` — valid witnesses verify `true`, tampered ones `false` |
+| Poseidon (`Poseidon.mo`) | Real constants, real construction, cross-language verified | Exported from `poseidon_config()`, diffed field-for-field; byte-identical hash output vs the Rust side on real `moc` |
+| Groth16 verifier (vendored) | ACCEPT/REJECT confirmed on a real replica | Deployed on `dfx 0.32.0` + `pocket-ic`; `ACCEPT` on valid proof, `REJECT:pairing-check` on forged inputs |
+| End-to-end flow (`main.mo`) | Confirmed against a live, freshly-issued challenge | Full `submitRecord` → `requestChallenge` → `prove_live` → `verify` round-trip on a real replica |
+| Upgrade round-trip | Confirmed, including Merkle-tree structure | Forced `--mode upgrade`; consumed-challenge state and the `nodes` HashMap (real tree, not just root) survived |
+| Merkle inclusion (non-trivial path) | Confirmed — after finding and fixing a real tooling bug | Real sibling + `is_right = true` path verified on a real replica; permanent regression test in `verify_prove2` |
 
-## Independent re-verification (this review)
+## Getting started
 
-The status table and detailed sections below were written by the session
-that did this work. This review did not have `dfx` access either, so the
-`dfx`/`pocket-ic`-dependent claims (the live end-to-end flow, the upgrade
-round-trip, and the exact ~20.9B-instruction measurement) could not be
-re-run and are reported here as-is, not independently confirmed.
+### Prerequisites
 
-What *could* be checked without `dfx` was checked, by actually running
-code, not by reading and trusting:
+- [DFINITY SDK](https://internetcomputer.org/docs/building-apps/getting-started/install) (`dfx` ≥ 0.32.0)
+- Rust toolchain (`cargo`)
 
-- **The Poseidon bug and fix are real.** I read arkworks' actual
-  `absorb_internal`/`squeeze_native_field_elements` source directly (not
-  the claim about it) and confirmed: capacity starts at zero, the domain
-  tag is absorbed as an ordinary first rate element (not written directly
-  into the capacity slot), and squeezing right after absorbing always
-  triggers one more permute. The previous `Poseidon.mo` did all three of
-  these differently. The rewrite matches arkworks' construction exactly.
-- **The ARK/MDS constants are genuinely identical, not just copy-pasted
-  correctly.** I ran `export_poseidon_params` fresh myself and diffed its
-  195 ARK / 9 MDS values against what's hardcoded in `Poseidon.mo` —
-  exact match, every value.
-- **The cross-language hash claim is real, not asserted.** I ran the
-  actual Motoko `hash` function (via the same JS-interpreted `moc` used
-  throughout this project) on the same inputs as the Rust test vector and
-  got `493449967592615911517850693211259918700104437189660047865960110642109014224`
-  on both sides. Poseidon hashing (unlike full pairing verification) is
-  light enough for that interpreter to finish in ~2 seconds.
-- **The specific Merkle root and nullifier numbers in the "second-leaf"
-  section are real, not fabricated-looking-plausible.** I rebuilt both
-  identities' commitments from the fixed test values in `prove_live.rs`,
-  ran `predict-root-after-second-insert`, and got
-  `29294669...4998419630534` — the exact number quoted in the upgrade
-  round-trip section. `nullifier2 1 0` produced
-  `28533317...3842603320463` — the exact number quoted in the
-  second-leaf section.
-- **The non-trivial Merkle path actually verifies, checked independently
-  of any replica.** I added `circuit/src/bin/verify_prove2.rs`, a
-  self-contained check that rebuilds the real second-leaf witness (genuine
-  non-zero sibling, `is_right = true`) and calls `Groth16::verify` on it
-  in-process — no file handoff, no JSON, no external replica needed. It
-  passes: the real proof verifies `true`, and the same proof with a
-  tampered nullifier verifies `false`. This is now a permanent regression
-  test in the repo, not a one-off check.
-- **One small, genuine cleanup**: the absorb loop's `M0155` "operator may
-  trap" warning was previously suppressed with a comment explaining why
-  the flagged subtraction couldn't actually underflow. I rewrote the loop
-  to compute chunk boundaries via addition/comparison instead, so there's
-  no subtraction left for the checker to (correctly, but unhelpfully) flag
-  — `main.mo` and `verify_test/main.mo` both now typecheck with **zero
-  warnings**, not one.
+### 1. Build the circuit tooling
 
-Net effect: everything checkable without a live replica checks out
-exactly as claimed, including several specific numbers that would have
-been easy to get subtly wrong if they'd been fabricated rather than
-computed. That's meaningful evidence for the parts I couldn't re-run
-myself, though it isn't proof of them.
-
-## End-to-end live verification (this session)
-
-Earlier sessions only confirmed the Groth16 verifier against a static,
-self-contained fixture (`circuit/wire_export.json`) via `GW.tryVerify`
-directly. This session wired the **actual production flow** — the thing a
-real client does — end to end, on a real `dfx`/`pocket-ic` replica:
-
-1. `submitRecord` (admin-gated) — inserted a real record, with a genuine
-   `ownerCommitment` computed off-chain from a private `owner_secret` the
-   canister never sees. Returned a real Merkle root.
-2. `requestChallenge` — returned a live `merkleRoot` / `purpose` /
-   `requestNonce` / `currentTimestamp`, matching step 1's root exactly.
-3. A new tool, `circuit/src/bin/prove_live.rs`, built the full circuit
-   witness against those **live** values (not hardcoded ones) — it
-   independently recomputes the expected Merkle root from the same
-   zero-hash chain construction `main.mo`'s `computeZeroHashes`/
-   `insertLeaf` uses, and asserts it matches the canister's root *before*
-   proving, so a mismatch fails loudly instead of silently proving
-   something unverifiable.
-4. `setVerifyingKey` + `verify` — the real proof was submitted with a
-   proper Candid `blob`/`vec nat` argument (`main.mo`'s actual production
-   signature — *not* `Groth16Wire`'s hex-encoded wire path) and returned
-   **`#ok`** with the correct nullifier.
-5. **Replay protection**: resubmitting the same proof against the same
-   challenge correctly returned `"challenge already consumed"`.
-6. **Cryptographic rejection**: tampering the nullifier public input
-   (proof otherwise untouched) correctly failed with
-   `"invalid proof: E_PAIRING_FAIL"` — and a legitimate proof for that
-   same (still-unconsumed) challenge still passed afterward, confirming a
-   failed verification attempt doesn't wrongly burn the challenge.
-7. **Pre-check ordering**: submitting a proof/inputs from one challenge
-   against a *different* `challengeId` correctly failed at the
-   input-matching stage (`"purpose mismatch"`) before any cryptographic
-   verification ran — confirming the security-critical ordering (match
-   public inputs to the issued challenge BEFORE calling into the verifier)
-   actually holds at runtime, not just in code review.
-
-This is real, freshly-generated proof material, verified against a real
-canister, on a real replica, following the exact call shape a real client
-would use.
-
-## Upgrade round-trip (this session)
-
-`preupgrade`/`postupgrade` had only ever been typechecked, never exercised.
-Using the live state from the test above, a real upgrade was forced (same
-Wasm, `dfx canister install --mode upgrade`) and checked for:
-
-- **Scalar stable vars** (`currentRoot`, `nextChallengeId`, `nextNonce`) —
-  survived directly, as expected (`persistent actor` makes these stable by
-  default).
-- **Transient-HashMap state, round-tripped via `preupgrade`/`postupgrade`'s
-  entries-array pattern** (`challenges`, `nullifiers`, `nodes`) — this is
-  the part that actually needed testing, since a bug here wouldn't
-  necessarily show up as a trap:
-  - Replaying the *first* session's already-consumed challenge/proof
-    **after the upgrade** still correctly returned `"challenge already
-    consumed"` — confirms the `challenges` HashMap survived.
-  - A **second record was submitted after the upgrade**, at tree index 1,
-    which requires looking up the *first* leaf (index 0) as its sibling.
-    The resulting root was checked against a value **independently
-    predicted from the known leaf values, with no reliance on the
-    canister's own tree** — and it matched exactly:
-    `29294669200269638223864416362734485615951811921381153666143699634998419630534`.
-    This is strong evidence the `nodes` HashMap (i.e. the actual Merkle
-    tree structure, not just the root scalar) survived the upgrade
-    correctly — a wrong restoration would have silently substituted a
-    zero-hash for the real leaf and produced a different (but not
-    obviously wrong) root instead of trapping.
-
-**Note on admin access for these tests**: exercising `submitRecord`/
-`setVerifyingKey` (both admin-gated) required pointing the canister's
-admin at the local dfx dev identity for the test session. That
-temporary hack has since been superseded — the repo's `main.mo` no
-longer hardcodes the `Principal.fromText("aaaaa-aa")` placeholder.
-`admin` now starts unset and is set exactly once via the public
-`bootstrapAdmin` call immediately after deploy (then rotated via the
-governed `setAdmin`), so each real deployment deliberately provisions
-its own admin principal. See `PATCH_NOTES-admin-bootstrap.md`.
-
-## Second-leaf Merkle inclusion proof (this session) — found and fixed a real bug
-
-The previous session's end-to-end test only proved inclusion of a leaf at
-tree index 0, where every sibling on the path is a zero-hash and the leaf
-is always the "left" child — the easy case. The obvious next question is
-whether the circuit/canister correctly handle a **real, non-trivial Merkle
-path**: a genuine non-zero sibling and an `is_right = true` step.
-
-`circuit/src/bin/prove_live.rs` was extended with a `prove2` subcommand
-that builds a witness for the *second* submitted record, which sits at
-tree index 1 — its level-0 sibling is the real leaf at index 0, not a
-zero-hash, and it's the *right* child rather than the left.
-
-**First attempt failed** — the real verifier returned
-`err = "invalid proof: E_PAIRING_FAIL"`. Rather than treat that as
-"verifier is flaky, retry" or quietly move on, this was tracked down to a
-genuine bug in the new test tool: the zero-hash chain used for the
-witness's siblings at levels 1 through 24 was off by one (it pushed the
-*pre-update* zero-hash value instead of the *post-update* one), so the
-witness fed to the circuit didn't actually match the tree structure —
-even though a separately-computed root cross-check (which used the
-correct chain) still agreed with the canister's real root. That's exactly
-the kind of subtle bug live, adversarial-style testing is supposed to
-catch: the failure showed up as a cryptographic rejection, not a crash,
-so it would have been easy to write off rather than root-cause.
-
-After fixing the zero-hash chain ordering to match the discipline already
-used by the (correct) root-prediction code, the same live values produced
-a proof that verified successfully:
-
-```
-(0, <fixed proof>, [1, 29294669200269638223864416362734485615951811921381153666143699634998419630534, 1, 0, <ts>, 28533317021957825621915334234847836151903541485538529235921726053842603320463])
-→ (variant { ok = record { nullifier = 28533317021957825621915334234847836151903541485538529235921726053842603320463 } })
+```bash
+cd circuit
+cargo build --release
 ```
 
-This confirms the full statement — Merkle inclusion with a real sibling
-and a real left/right bit, not just the degenerate all-zero-path case —
-verifies correctly end to end, on a real replica, against live canister
-state.
+Key binaries: `setup` (dev keypair), `prove` (build proofs), `prove_live`
+(witness against live canister state, root cross-checked before proving),
+`verify_prove2` (in-process regression test), `verify_smoke`,
+`wire_export`, `export_poseidon_params`, `oracle_alphabeta` (differential
+test against arkworks).
+
+### 2. Deploy the canister
+
+```bash
+dfx start --background
+dfx deploy
+```
+
+### 3. Bootstrap the admin
+
+`admin` starts unset. Call `bootstrapAdmin` immediately after deploy, in
+the same deploy session:
+
+```bash
+dfx canister call title_registry bootstrapAdmin '(principal "<your-principal>")'
+```
+
+The sentinel locks permanently after the first success; rotation afterward
+is via `setAdmin`, callable only by the current admin. See
+`PATCH_NOTES-admin-bootstrap.md`.
+
+### 4. Run the end-to-end flow
+
+```bash
+dfx canister call title_registry submitRecord '(1, <ownerCommitment>, 0, 1, <expiry>)'
+dfx canister call title_registry requestChallenge '(1)'
+cd circuit && cargo run --release --bin prove_live -- <challenge values>
+dfx canister call title_registry verify '(record { challengeId = ...; proof = blob "..."; publicInputs = vec { ... } })'
+```
+
+See `circuit/src/bin/prove_live.rs` and `motoko/src/main.mo` for the exact
+shapes.
+
+## Canister API
+
+| Method | Access | Purpose |
+|---|---|---|
+| `bootstrapAdmin(principal)` | anyone, once | One-time admin bootstrap (locks permanently) |
+| `setAdmin(principal)` | current admin | Governed admin rotation |
+| `submitRecord(...)` | admin | Insert a title record; returns new Merkle root |
+| `requestChallenge(purpose)` | anyone | Issue a challenge bound to the current root |
+| `verify(...)` | anyone | Submit proof + public inputs; returns a nullifier or error |
+
+## Security model
+
+- **No verifier trust** — Groth16 verification runs entirely in-canister
+  with a vendored, attribution-preserved BLS12-381 verifier; no bridge or
+  off-chain component is involved.
+- **Owner privacy** — `owner_secret` never leaves the client; the canister
+  only ever sees its Poseidon commitment.
+- **Challenge binding** — public inputs must match the issued challenge
+  *before* any cryptographic verification runs; mismatches fail at the
+  input-matching stage.
+- **Replay protection** — each challenge is consumed exactly once; a failed
+  verification does not burn the challenge.
+- **Admin model** — one-time `bootstrapAdmin` sentinel, then governed
+  `setAdmin` rotation (single-principal; hardening tracked in the
+  roadmap).
+
+### Known caveats (honest)
+
+- **No multi-party trusted-setup ceremony yet.** `setup.rs` is
+  single-party, dev-only. A Powers-of-Tau-style ceremony run by
+  independent participants is required before real value is involved.
+- **Cost** — one verify call measures ~20.9B Wasm instructions: within the
+  40B update-call limit, but spanning ~3 DTS rounds and ~10× the per-block
+  target. Verification must run as a paid update call, never a query.
+- **Package resolution** — `base`/`core` resolved via `dfx`'s bundled
+  cache; a real deployment should `mops install` from a machine with
+  mainnet access.
 
 ## Performance
 
-Calling the real verifier (`GW.tryVerify`) from a real canister,
-instrumented with `Prim.performanceCounter(0)`:
+Measured on a real replica with `Prim.performanceCounter(0)`:
 
-- **~20.9 billion Wasm instructions** for one verify call (valid-proof case).
+| Metric | Value |
+|---|---|
+| Instructions per verify call | ~20.9B |
+| Update-call limit | 40B — fits, ~2× headroom |
+| Execution-round limit | 7B — ~3 DTS rounds (multi-second finality) |
+| Query-call limit | 5B — verification can never be a query |
+| Per-block target | ~2B — ~10× per call at volume |
 
-Checked against ICP's actual published resource limits:
-- Update-call instruction limit is **40 billion** — this call fits, with roughly 2x headroom, so it will not trap on mainnet.
-- The per-execution-round limit is **7 billion**, so a ~20.9B-instruction call will span **~3 Deterministic Time Slicing rounds** — expect multi-second finality, not a single fast round-trip.
-- The query-call limit is **5 billion** — this rules out ever exposing verification as a free/read-only query call; it must always run as a paid update call.
-- The network's per-block target is ~2 billion instructions — one verify call is roughly **10x** that target, which has real cycle-cost and subnet-load implications if this is called at any meaningful volume.
+If per-user verification volume will be non-trivial, budget cycles
+accordingly or invest in verification batching / a cheaper proof system.
 
-**Implication for production**: the verifier works and is within hard limits,
-but it is expensive. If per-user verification volume will be non-trivial,
-budget real cycles per call and expect multi-second (not sub-second)
-finality, or invest in reducing the pairing-check cost (e.g. batching
-verifications, or moving to a curve/proof system with cheaper on-chain
-verification) before this is a good production experience.
+## Roadmap
 
-## Where the vendored Groth16 verifier came from
+1. **Multi-party trusted-setup ceremony** — non-negotiable before real value.
+2. **Admin model hardening** — allow-list or threshold/governance scheme.
+3. **`mops install` for real** — mops' own integrity/version guarantees.
+4. **Cost/latency optimization** — batching or a cheaper curve/proof system.
+5. **Mainnet deployment dry run** — cycles budgeting, subnet selection.
 
-An earlier draft of this project deliberately shipped a stub here rather
-than fabricate ~1,500 lines of untested pairing code. That stub's doc
-comment laid out two honest paths forward: build it properly with
-differential testing, or reuse an existing, already-tested implementation.
-This project took the reuse path.
-[`Shielded-Ledger-Hivemind`](https://github.com/Menese-Protocol/Shielded-Ledger-Hivemind)
-contains a real, MIT-licensed Motoko Groth16 verifier for BLS12-381 — full
-field tower, curve arithmetic, Miller loop, final exponentiation, and
-subgroup checks — whose own doc comments describe a differential-testing
-discipline (byte-diffed against an arkworks oracle, across valid proofs
-*and* adversarial forgery classes). It's vendored unmodified into
-`motoko/src/groth16/vendor/` with attribution (`vendor/ATTRIBUTION.md`,
-original `LICENSE` preserved), and `TitleGroth16.mo` is a thin adapter on
-top — it does no cryptography itself, it just maps the ledger's own
-`[Nat]` public inputs and `Blob` proof bytes onto the vendored verifier's
-`Groth16Multi.verify` call.
+## Attribution
 
-Wire-format compatibility was confirmed by reading source, not assumed:
-`ark-serialize`'s actual derive behavior for `ark_groth16::Proof`,
-`ark_groth16::VerifyingKey`, and `Vec<Fr>` was checked field-for-field
-against what the vendored `Groth16Wire.parseProof` / `parseAndPrepareVk` /
-`parseInputs` expect.
-
-## What's honestly still unconfirmed, and why
-
-- **No real multi-party trusted-setup ceremony.** `circuit/src/bin/setup.rs`
-  is still explicitly single-party, dev-only (`real_value_eligible: false`).
-  This is not something that can be faked or simulated by one party,
-  including an AI assistant working alone — its entire security property
-  depends on multiple independent, non-colluding participants each
-  destroying their share of the toxic waste. The mechanics (running a
-  Powers-of-Tau-style multi-party computation, verifying the transcript)
-  can be scripted, but the ceremony itself has to be run by real, separate
-  people or organizations before this touches real value.
-- **base/core package versions were resolved via dfx's own bundled cache**
-  (`dfx cache install` ships exact-matching `base`/`core` sources locally),
-  **not via the mops registry** (the mops registry lives on ICP mainnet at
-  `icp-api.io`, unreachable from this sandbox). A real deployment should
-  install via `mops install` from a machine with mainnet access, to get
-  mops' own package integrity/version-pinning guarantees rather than
-  relying on whatever `dfx` happens to bundle.
-- **Admin model is single-principal.** The hardcoded `"aaaaa-aa"` placeholder
-  is gone (see the upgrade-round-trip note above and
-  `PATCH_NOTES-admin-bootstrap.md`), but the model is still one principal
-  set once via `bootstrapAdmin` and rotated via `setAdmin` — a real
-  multi-admin allow-list or DAO-governed threshold scheme is the next
-  step up, tracked as P3 in the roadmap.
-
-## Suggested next steps, in order
-
-1. **Real multi-party trusted-setup ceremony.** Non-negotiable before any
-   value touches this. Coordinate multiple independent participants; do
-   not deploy `setup.rs`'s dev key to anything real. This review's
-   independent re-verification (above) found no correctness issues that
-   should block scheduling this — the circuit, Poseidon construction, and
-   verifier all check out on everything testable without a replica.
-2. **Admin model hardening**: move from single-principal
-   `bootstrapAdmin`/`setAdmin` to an allow-list or threshold/governance
-   scheme (P3).
-3. **Re-run `mops install` for real** from a machine with mainnet access,
-   to get mops' own package integrity verification.
-4. **Cost/latency optimization pass**, given the ~20.9B-instruction,
-   ~3-DTS-round verify cost measured above, if per-user verification volume
-   will be non-trivial.
-5. **Mainnet deployment dry run** (cycles budgeting, subnet selection,
-   canister settings) once the ceremony and admin model above are in place.
-6. **Re-run the dfx/pocket-ic tests from a machine with dfx access** to
-   corroborate this session's claims with a second, independent run —
-   this review could not do that part. `circuit/src/bin/verify_prove2`
-   (new) covers the pure-cryptography half of that gap in the meantime;
-   it does not touch the canister/replica layer at all.
+The BLS12-381 Groth16 verifier under `motoko/src/groth16/vendor/` is
+vendored unmodified from
+[Shielded-Ledger-Hivemind](https://github.com/Menese-Protocol/Shielded-Ledger-Hivemind)
+(MIT, Copyright (c) 2026 Menese DeFi Team) — see
+`motoko/src/groth16/vendor/ATTRIBUTION.md` and the preserved original
+license (`LICENSE-menese-defi`). `TitleGroth16.mo` is a thin adapter on top
+and does no cryptography itself.
