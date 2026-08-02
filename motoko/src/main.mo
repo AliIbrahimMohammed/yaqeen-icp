@@ -32,44 +32,73 @@ persistent actor TitleRegistry {
   // the text representation (avoids relying on `**` overflow semantics).
   func natHash(n : Nat) : Nat32 { Text.hash(Nat.toText(n)) };
 
-  // FIXED (was a hardcoded "aaaaa-aa" placeholder — the IC management
-  // canister's well-known principal, not a real admin identity).
+  // Admin model: multi-principal allow-list.
   //
-  // This build of `moc` doesn't parse constructor arguments on a plain
-  // `actor` (that needs `actor class ... = this { }`, a bigger structural
-  // change not attempted here), so the real fix is a one-time bootstrap
-  // sentinel instead: `admin` starts unset, and `bootstrapAdmin` can be
-  // called by anyone exactly once to set the real admin — after that it's
-  // permanently locked and only rotatable via the governed `setAdmin` below.
+  // History: was a hardcoded "aaaaa-aa" placeholder (the IC management
+  // canister's well-known principal, not a real admin identity), then a
+  // one-time bootstrap sentinel with single-principal rotation
+  // (`bootstrapAdmin`/`setAdmin`). Security review asked for a real
+  // allow-list rather than a single hardcoded/rotated identity — this is
+  // that: several principals can be admins, and the list is changeable
+  // only through a governed path (existing admins).
+  //
+  // `admins` is a plain array of Principal — stable by default in a
+  // `persistent actor` (no transient HashMap needed for a list this
+  // small) and round-trips upgrades with no extra hooks. It starts
+  // empty:
+  //   - `bootstrapAdmin` is callable by anyone exactly once (while the
+  //     list is empty) to seed the first admin.
+  //   - `addAdmin`/`removeAdmin` are governed by the current admins.
+  //   - `removeAdmin` can never remove the last admin, so the registry
+  //     can never be left unadministered by accident.
   //
   // OPERATIONAL REQUIREMENT: call `bootstrapAdmin` with the real admin
   // principal immediately after deploy, in the same deploy script/session,
   // BEFORE the canister id is shared or any other call is made — the same
   // "init then lock" discipline a constructor argument would have given
   // you for free, just enforced by a runtime check instead of the type
-  // system. Until `bootstrapAdmin` is called, `submitRecord`/`setVerifyingKey`/
-  // `setAdmin` are unreachable by anyone (there is no admin yet), so there is
-  // no window where an attacker can act AS admin — only a window where the
-  // real admin hasn't claimed the role yet.
-  var admin : ?Principal = null;
+  // system. Until `bootstrapAdmin` is called, `submitRecord`/
+  // `setVerifyingKey` are unreachable by anyone (there is no admin yet),
+  // so there is no window where an attacker can act AS admin — only a
+  // window where the real admin hasn't claimed the role yet.
+  var admins : [Principal] = [];
 
-  /// One-time bootstrap: succeeds only while `admin` is still unset.
-  public shared func bootstrapAdmin(realAdmin : Principal) : async Result.Result<(), Text> {
-    switch (admin) {
-      case (?_) { #err("admin already set — use setAdmin instead") };
-      case null { admin := ?realAdmin; #ok(()) };
+  func isAdmin(p : Principal) : Bool {
+    for (a in admins.vals()) {
+      if (a == p) return true;
     };
+    false;
   };
 
-  /// Governed rotation path: only the CURRENT admin can hand off to a new
-  /// one. Still a single-principal model (a multi-principal allow-list or
-  /// threshold scheme is the next step up, tracked separately) — but it's
-  /// no longer a hardcoded, never-changeable placeholder.
-  public shared (msg) func setAdmin(newAdmin : Principal) : async Result.Result<(), Text> {
-    if (?msg.caller != admin) { return #err("unauthorized") };
-    admin := ?newAdmin;
+  /// One-time bootstrap: succeeds only while the allow-list is still empty.
+  public shared func bootstrapAdmin(realAdmin : Principal) : async Result.Result<(), Text> {
+    if (admins.size() > 0) {
+      return #err("admins already set — use addAdmin instead");
+    };
+    admins := [realAdmin];
     #ok(());
   };
+
+  /// Governed path: any current admin can grant admin to a new principal.
+  public shared (msg) func addAdmin(newAdmin : Principal) : async Result.Result<(), Text> {
+    if (not isAdmin(msg.caller)) { return #err("unauthorized") };
+    if (isAdmin(newAdmin)) { return #err("already an admin") };
+    admins := Array.append<Principal>(admins, [newAdmin]);
+    #ok(());
+  };
+
+  /// Governed path: any current admin can revoke admin (but never the last
+  /// one — the registry must always stay administered).
+  public shared (msg) func removeAdmin(target : Principal) : async Result.Result<(), Text> {
+    if (not isAdmin(msg.caller)) { return #err("unauthorized") };
+    if (admins.size() <= 1) { return #err("cannot remove the last admin") };
+    if (not isAdmin(target)) { return #err("not an admin") };
+    admins := Array.filter<Principal>(admins, func (p : Principal) : Bool { p != target });
+    #ok(());
+  };
+
+  /// Read-only: current allow-list (operational visibility).
+  public shared query func listAdmins() : async [Principal] { admins };
 
   let treeDepth : Nat = 25;
 
@@ -158,8 +187,8 @@ persistent actor TitleRegistry {
     licenseStatus : Nat,
     licenseExpiry : Nat,
   ) : async Result.Result<Nat, Text> {
-    if (?msg.caller != admin) {
-      return #err("unauthorized — see production checklist: gate this behind real admin auth");
+    if (not isAdmin(msg.caller)) {
+      return #err("unauthorized");
     };
     let record : Record = {
       propertyId; ownerCommitment; encumbranceFlag; licenseStatus; licenseExpiry;
@@ -245,7 +274,7 @@ persistent actor TitleRegistry {
   /// (bad encoding, off-curve points, points outside the r-torsion
   /// subgroup) rather than caching something unusable.
   public shared (msg) func setVerifyingKey(hex : Text) : async Result.Result<(), Text> {
-    if (?msg.caller != admin) return #err("unauthorized");
+    if (not isAdmin(msg.caller)) return #err("unauthorized");
     switch (Groth16.parseAndPrepareVk(hex)) {
       case (null) { #err("invalid verifying key encoding or contents") };
       case (?prepared) {

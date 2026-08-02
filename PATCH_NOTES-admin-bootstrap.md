@@ -1,6 +1,11 @@
 # Fix: hardcoded admin principal (P0.1 from the roadmap)
 
-## What changed
+> **Update (security review round 2):** the single-principal
+> `bootstrapAdmin`/`setAdmin` model below has been upgraded to a
+> **multi-principal allow-list** — see the "Round 2: allow-list upgrade"
+> section at the bottom. The historical record is kept for context.
+
+## What changed (round 1)
 
 `motoko/src/main.mo` — `admin` was:
 ```motoko
@@ -80,3 +85,43 @@ dfx canister call title_registry bootstrapAdmin '(principal "<your-principal>")'
   the earlier Groth16 patches; recommend exercising `bootstrapAdmin` →
   `setAdmin` → re-attempt with the old admin (should fail) as part of the
   same real `dfx` session recommended for the P1 items in the roadmap.
+
+## Round 2: allow-list upgrade (security review)
+
+A follow-up security review asked to move past a single rotated principal
+toward a real multi-principal allow-list, "changeable only through a
+governed path". Landed in `main.mo`:
+
+```motoko
+var admins : [Principal] = [];       // stable by default (persistent actor)
+
+func isAdmin(p : Principal) : Bool { ... }   // linear scan, list is tiny
+
+public shared func bootstrapAdmin(realAdmin : Principal) : async Result.Result<(), Text>
+public shared (msg) func addAdmin(newAdmin : Principal) : async Result.Result<(), Text>
+public shared (msg) func removeAdmin(target : Principal) : async Result.Result<(), Text>
+public shared query func listAdmins() : async [Principal]
+```
+
+- `bootstrapAdmin` succeeds only while the list is empty (same one-time
+  sentinel semantics as round 1).
+- `addAdmin`/`removeAdmin` require an existing admin caller.
+- `removeAdmin` refuses to remove the **last** admin — the registry can
+  never be left unadministered by accident.
+- The list is a plain `[Principal]` array: stable across upgrades with no
+  `preupgrade`/`postupgrade` hooks.
+- `setAdmin` (round 1) is **removed** — there are no other callers in the
+  repo; deploy scripts should use `addAdmin`/`removeAdmin`.
+
+Verification: typechecked with **0 errors** on `main.mo`,
+`verify_test/main.mo`, and `Groth16MultiTest.mo` using node-motoko's
+JS-interpreted `moc` against real `motoko-base` (moc-1.9.0) and
+`motoko-core` (2.5.0) sources — same single pre-existing unrelated M0155
+warning in vendored `Fp.mo` as before. Still not run on a real replica
+here (no `dfx`/`pocket-ic` in this sandbox); exercise
+`bootstrapAdmin` → `addAdmin` → `removeAdmin` (incl. last-admin refusal
+and non-admin refusal) in the real `dfx` session.
+
+Still open (P3): a threshold/multi-sig admin scheme, and the multi-party
+trusted-setup ceremony (see `circuit/src/bin/setup.rs` — now fail-closed
+without an explicit `--allow-dev` flag).

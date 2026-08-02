@@ -120,7 +120,7 @@ dfx canister call title_registry bootstrapAdmin '(principal "<your-principal>")'
 ```
 
 The sentinel locks permanently after the first success; rotation afterward
-is via `setAdmin`, callable only by the current admin. See
+is via `addAdmin`/`removeAdmin`, callable only by current admins. See
 `PATCH_NOTES-admin-bootstrap.md`.
 
 ### 4. Run the end-to-end flow
@@ -139,8 +139,10 @@ shapes.
 
 | Method | Access | Purpose |
 |---|---|---|
-| `bootstrapAdmin(principal)` | anyone, once | One-time admin bootstrap (locks permanently) |
-| `setAdmin(principal)` | current admin | Governed admin rotation |
+| `bootstrapAdmin(principal)` | anyone, once | Seed the admin allow-list (locks permanently) |
+| `addAdmin(principal)` | any admin | Add a principal to the admin allow-list |
+| `removeAdmin(principal)` | any admin | Revoke admin (never the last one) |
+| `listAdmins()` | anyone (query) | Current admin allow-list |
 | `submitRecord(...)` | admin | Insert a title record; returns new Merkle root |
 | `requestChallenge(purpose)` | anyone | Issue a challenge bound to the current root |
 | `verify(...)` | anyone | Submit proof + public inputs; returns a nullifier or error |
@@ -157,9 +159,10 @@ shapes.
   input-matching stage.
 - **Replay protection** — each challenge is consumed exactly once; a failed
   verification does not burn the challenge.
-- **Admin model** — one-time `bootstrapAdmin` sentinel, then governed
-  `setAdmin` rotation (single-principal; hardening tracked in the
-  roadmap).
+- **Admin model** — multi-principal allow-list: seeded once via
+  `bootstrapAdmin`, governed thereafter via `addAdmin`/`removeAdmin`
+  (the last admin can never be removed). Not yet a threshold scheme
+  (tracked in the roadmap).
 
 ### Known caveats (honest)
 
@@ -191,7 +194,8 @@ accordingly or invest in verification batching / a cheaper proof system.
 ## Roadmap
 
 1. **Multi-party trusted-setup ceremony** — non-negotiable before real value.
-2. **Admin model hardening** — allow-list or threshold/governance scheme.
+2. **Admin model hardening** — threshold/multi-sig scheme on top of the
+   landed allow-list.
 3. **`mops install` for real** — mops' own integrity/version guarantees.
 4. **Cost/latency optimization** — batching or a cheaper curve/proof system.
 5. **Mainnet deployment dry run** — cycles budgeting, subnet selection.

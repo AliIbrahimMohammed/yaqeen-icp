@@ -3,6 +3,13 @@
 //! `real_value_eligible: false`. Do not point a production verifying key at
 //! output from this binary. A real deployment needs the multi-party ceremony
 //! (see project README).
+//!
+//! Fail-closed: the binary REFUSES to run unless the explicit dev-opt-in
+//! flag `--allow-dev` is passed, so a production/CI invocation can never
+//! accidentally generate single-party key material. Anyone who does run it
+//! holds the "toxic waste" — the ability to forge arbitrary valid-looking
+//! proofs for any statement — and must destroy all traces before real value
+//! is involved.
 
 use ark_bls12_381::Bls12_381;
 use ark_groth16::Groth16;
@@ -13,6 +20,23 @@ use rand_chacha::ChaCha20Rng;
 use title_verification::TitleVerificationCircuit;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|a| a == "--allow-dev") {
+        eprintln!(
+            "REFUSING TO RUN: this binary performs a SINGLE-PARTY Groth16 setup \
+             whose toxic waste is not destroyed by a multi-party ceremony. \
+             Whoever runs it can forge arbitrary valid-looking proofs for any \
+             statement."
+        );
+        eprintln!(
+            "If you understand this is DEV-ONLY and accept that its output must \
+             never back real value, re-run with: {} --allow-dev",
+            args[0]
+        );
+        std::process::exit(1);
+    }
+    eprintln!("DEV-ONLY opt-in acknowledged (--allow-dev)");
+
     let mut rng = ChaCha20Rng::from_entropy();
     let circuit = TitleVerificationCircuit::empty();
 
