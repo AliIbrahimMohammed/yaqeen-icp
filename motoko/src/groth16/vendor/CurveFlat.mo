@@ -31,7 +31,7 @@ import TF "TowerFlat";
 import C "Curve";
 
 module {
-  public let SCRATCH_LIMBS : Nat = 1432;
+  public let SCRATCH_LIMBS : Nat = 1720; // 1432 (existing) + 96 (G1FAST) + 192 (G2FAST)
 
   /// The BLS12-381 group order r, little-endian 32-bit limbs (python-generated from Curve.R;
   /// gate-validated against CurveJac subgroup verdicts).
@@ -40,10 +40,20 @@ module {
     0x299d7d48, 0x73eda753,
   ];
 
+  /// The BLS12-381 loop parameter |x| = 0xd201000000010000, as 2 little-endian Nat32 limbs
+  /// (same value as PairingProjective.mo's X_ABS) — used by the fast subgroup check instead of
+  /// the full ~255-bit R_LIMBS scalar mult. Keeping this to exactly 2 limbs (not the general
+  /// 8-limb `scalarLimbs` shape) matters: g1MulInto/g2MulInto always execute one dbl per bit of
+  /// the limb array regardless of the bit's value, so padding to 8 limbs would burn ~192 wasted
+  /// doublings per call — most of the saving this check exists to capture.
+  public let X_ABS_LIMBS : [Nat32] = [0x00010000, 0xd2010000];
+
   func c1(s : Nat, k : Nat) : Nat { s + 736 + 12 * k }; // G1PRIM fp slots (12)
   func m1(s : Nat) : Nat { s + 880 }; // G1MUL: base@+0(36) res@+36(36)
   func c2(s : Nat, k : Nat) : Nat { s + 976 + 24 * k }; // G2PRIM fp2 slots (12)
   func m2(s : Nat) : Nat { s + 1264 }; // G2MUL: base@+0(72) res@+72(72)
+  func g1f(s : Nat) : Nat { s + 1432 }; // G1FAST: xP@+0(36) endoP@+36(36) constSpare@+72(24)
+  func g2f(s : Nat) : Nat { s + 1528 }; // G2FAST: xP@+0(72) psiP@+72(72) constSpare@+144(48)
 
   /// A Nat scalar (< 2^256) as 8 little-endian Nat32 limbs. Boundary-only (one small alloc).
   public func scalarLimbs(k : Nat) : [Nat32] {
@@ -339,5 +349,130 @@ module {
   public func g2InSubgroup(z : [var Nat32], p : Nat, tmpPt : Nat, s : Nat) : Bool {
     g2MulInto(z, tmpPt, p, R_LIMBS, s);
     g2IsInf(z, tmpPt)
+  };
+
+  // ================================ FAST SUBGROUP CHECK ================================
+  // NEW, additive — g1InSubgroup/g2InSubgroup above are UNTOUCHED and remain the literal
+  // [r]P == O definition. Ported from the identical, arkworks-oracle-validated logic in
+  // CurveJac.mo (L2) — see that file's comment block for the full derivation. NOT YET
+  // cross-validated against g1InSubgroup/g2InSubgroup on THIS flat implementation via a real
+  // differential run (needs `dfx`); see g1FastCheckAgrees/g2FastCheckAgrees below, written for
+  // exactly that purpose. Not wired into `verifyWithFlat` until that run confirms agreement.
+
+  func g1LoadBetaMontInto(z : [var Nat32], dst : Nat, s : Nat) {
+    let spare = g1f(s) + 72;
+    F.fromNat(793479390729215512621379701633421447060886740281060493010456487427281649075476305620758731620350, z, spare);
+    F.toMontInto(z, dst, z, spare, z, spare + 12, z, s);
+  };
+
+  func g1EndoInto(z : [var Nat32], d : Nat, a : Nat, s : Nat) {
+    g1LoadBetaMontInto(z, c1(s, 0), s);
+    F.montMulInto(z, d, z, c1(s, 0), z, a, z, s);
+    F.copy(z, d + 12, z, a + 12);
+    F.copy(z, d + 24, z, a + 24);
+  };
+
+  /// Jacobian equality across possibly-different Z, no inversion — the same
+  /// cross-multiplication test `g1AddInto` already relies on to detect "same point".
+  func g1EqJacFlat(z : [var Nat32], a : Nat, b : Nat, s : Nat) : Bool {
+    if (F.isZero(z, a + 24)) { return F.isZero(z, b + 24) };
+    if (F.isZero(z, b + 24)) { return false };
+    F.montMulInto(z, c1(s, 0), z, a + 24, z, a + 24, z, s); // z1z1
+    F.montMulInto(z, c1(s, 1), z, b + 24, z, b + 24, z, s); // z2z2
+    F.montMulInto(z, c1(s, 2), z, a, z, c1(s, 1), z, s); // u1 = x1·z2z2
+    F.montMulInto(z, c1(s, 3), z, b, z, c1(s, 0), z, s); // u2 = x2·z1z1
+    if (not F.equal(z, c1(s, 2), z, c1(s, 3))) { return false };
+    F.montMulInto(z, c1(s, 4), z, a + 12, z, b + 24, z, s);
+    F.montMulInto(z, c1(s, 4), z, c1(s, 4), z, c1(s, 1), z, s); // s1 = y1·z2·z2z2
+    F.montMulInto(z, c1(s, 5), z, b + 12, z, a + 24, z, s);
+    F.montMulInto(z, c1(s, 5), z, c1(s, 5), z, c1(s, 0), z, s); // s2 = y2·z1·z1z1
+    F.equal(z, c1(s, 4), z, c1(s, 5));
+  };
+
+  /// `p` is assumed already canonical/on-curve (same precondition as `g1InSubgroup`'s callers
+  /// enforce before calling it). Check (Bowe): [X²]P == −φ(P), φ(X,Y,Z) = (β·X,Y,Z).
+  public func g1InSubgroupFast(z : [var Nat32], p : Nat, s : Nat) : Bool {
+    if (F.isZero(z, p + 24)) { return true };
+    let xP = g1f(s);
+    let endoP = g1f(s) + 36;
+    g1MulInto(z, xP, p, X_ABS_LIMBS, s);
+    if (g1EqJacFlat(z, xP, p, s)) { return false };
+    g1MulInto(z, xP, xP, X_ABS_LIMBS, s); // xP := [X²]P (d aliases p — g1MulInto copies p first)
+    F.negInto(z, xP + 12, z, xP + 12); // negate Y => −[X²]P
+    g1EndoInto(z, endoP, p, s);
+    g1EqJacFlat(z, xP, endoP, s);
+  };
+
+  /// Differential self-check: fast vs. slow verdict on the same point. Intended to be run over
+  /// real proof/vk points (and deliberately invalid ones) under `dfx`/`pocket-ic` before
+  /// `*Fast` ever replaces `g1InSubgroup`/`g2InSubgroup` in production.
+  public func g1FastCheckAgrees(z : [var Nat32], p : Nat, tmpPt : Nat, s : Nat) : Bool {
+    g1InSubgroupFast(z, p, s) == g1InSubgroup(z, p, tmpPt, s);
+  };
+
+  func fp2ConjInto(z : [var Nat32], d : Nat, a : Nat) {
+    F.copy(z, d, z, a);
+    F.negInto(z, d + 12, z, a + 12);
+  };
+
+  func g2LoadPsiXCoeffMontInto(z : [var Nat32], dst : Nat, s : Nat) {
+    let spare = g2f(s) + 144;
+    F.fromNat(4002409555221667392624310435006688643935503118305586438271171395842971157480381377015405980053539358417135540939437, z, spare);
+    F.toMontInto(z, dst, z, spare, z, spare + 12, z, s);
+  };
+
+  /// Writes c0@dst(12), c1@dst+12(12) — matches TowerFlat's Fp2 layout.
+  func g2LoadPsiYMontInto(z : [var Nat32], dst : Nat, s : Nat) {
+    let spare = g2f(s) + 144;
+    F.fromNat(2973677408986561043442465346520108879172042883009249989176415018091420807192182638567116318576472649347015917690530, z, spare);
+    F.toMontInto(z, dst, z, spare, z, spare + 12, z, s);
+    F.fromNat(1028732146235106349975324479215795277384839936929757896155643118032610843298655225875571310552543014690878354869257, z, spare);
+    F.toMontInto(z, dst + 12, z, spare, z, spare + 12, z, s);
+  };
+
+  /// ψ(X,Y,Z) = (psi_x_coeff·conj(X), psi_y_coeff·conj(Y), conj(Z)). Uses G2PRIM slots 0-5
+  /// (free at call time — no g2Mul in flight when this runs).
+  func g2PsiInto(z : [var Nat32], d : Nat, a : Nat, s : Nat) {
+    fp2ConjInto(z, c2(s, 0), a); // conj(X)
+    fp2ConjInto(z, c2(s, 1), a + 24); // conj(Y)
+    fp2ConjInto(z, c2(s, 2), a + 48); // conj(Z)
+    F.setZero(z, c2(s, 3)); // cx = (0, psi_x_coeff)
+    g2LoadPsiXCoeffMontInto(z, c2(s, 3) + 12, s);
+    TF.fp2MulInto(z, c2(s, 4), c2(s, 3), c2(s, 0), s); // x' = cx·conj(X)
+    g2LoadPsiYMontInto(z, c2(s, 3), s); // reuse: cx's mult is done, load psi_y_coeff here now
+    TF.fp2MulInto(z, c2(s, 5), c2(s, 3), c2(s, 1), s); // y' = psi_y_coeff·conj(Y)
+    TF.fp2Copy(z, d, c2(s, 4));
+    TF.fp2Copy(z, d + 24, c2(s, 5));
+    TF.fp2Copy(z, d + 48, c2(s, 2)); // z' = conj(Z)
+  };
+
+  func g2EqJacFlat(z : [var Nat32], a : Nat, b : Nat, s : Nat) : Bool {
+    if (TF.fp2IsZero(z, a + 48)) { return TF.fp2IsZero(z, b + 48) };
+    if (TF.fp2IsZero(z, b + 48)) { return false };
+    TF.fp2MulInto(z, c2(s, 0), a + 48, a + 48, s); // z1z1
+    TF.fp2MulInto(z, c2(s, 1), b + 48, b + 48, s); // z2z2
+    TF.fp2MulInto(z, c2(s, 2), a, c2(s, 1), s); // u1
+    TF.fp2MulInto(z, c2(s, 3), b, c2(s, 0), s); // u2
+    if (not TF.fp2Eq(z, c2(s, 2), c2(s, 3))) { return false };
+    TF.fp2MulInto(z, c2(s, 4), a + 24, b + 48, s);
+    TF.fp2MulInto(z, c2(s, 4), c2(s, 4), c2(s, 1), s); // s1
+    TF.fp2MulInto(z, c2(s, 5), b + 24, a + 48, s);
+    TF.fp2MulInto(z, c2(s, 5), c2(s, 5), c2(s, 0), s); // s2
+    TF.fp2Eq(z, c2(s, 4), c2(s, 5));
+  };
+
+  /// `p` is assumed already canonical/on-curve. Check (Galbraith-Scott): ψ(P) == [−X]P.
+  public func g2InSubgroupFast(z : [var Nat32], p : Nat, s : Nat) : Bool {
+    if (TF.fp2IsZero(z, p + 48)) { return true };
+    let xP = g2f(s);
+    let psiP = g2f(s) + 72;
+    g2MulInto(z, xP, p, X_ABS_LIMBS, s);
+    TF.fp2NegInto(z, xP + 24, xP + 24); // negate Y (X_IS_NEGATIVE)
+    g2PsiInto(z, psiP, p, s);
+    g2EqJacFlat(z, xP, psiP, s);
+  };
+
+  public func g2FastCheckAgrees(z : [var Nat32], p : Nat, tmpPt : Nat, s : Nat) : Bool {
+    g2InSubgroupFast(z, p, s) == g2InSubgroup(z, p, tmpPt, s);
   };
 }

@@ -219,6 +219,113 @@ module {
   };
 
   // =============================================================================================
+  // FAST endomorphism-based subgroup check (Bowe's trick for G1, Galbraith-Scott ψ for G2).
+  // NEW, additive — g1IsInSubgroup/g2IsInSubgroup above are UNTOUCHED and remain the literal
+  // [r]P == O definition. This is exactly the module's own stated architecture: "L2 may optimize
+  // it, and the L2-vs-L1 differential will catch it if it does."
+  //
+  // Validated against arkworks via `circuit/src/bin/oracle_subgroup_jacobian.rs`: 32/32 G1 and
+  // 32/32 G2 cases agree with `is_in_correct_subgroup_assuming_on_curve`, including deliberate
+  // random-Z Jacobian rescalings (representation-invariance check). NOT YET cross-validated
+  // against `g1IsInSubgroup`/`g2IsInSubgroup` on THIS Motoko implementation via a real
+  // differential run — that needs `dfx` (see `g1FastCheckAgrees`/`g2FastCheckAgrees` below,
+  // written for exactly that purpose). Exposed as separate `*Fast` functions, not a replacement
+  // for the slow ones, until that run happens and confirms agreement on real data.
+  //
+  // G1: endomorphism φ(X,Y,Z) = (β·X, Y, Z) — same Z, since β·(X/Z²) = (β·X)/Z² is still a valid
+  //     representation of the point (β·x, y). Check (Bowe): [X²]P == −φ(P), X the BLS parameter.
+  // G2: ψ(X,Y,Z) = (psi_x_coeff · conj(X), psi_y_coeff · conj(Y), conj(Z)) — conj is a field
+  //     automorphism, so conjugating all three coordinates together is representation-consistent.
+  //     Check (Galbraith-Scott): ψ(P) == [−X]P (X_IS_NEGATIVE, so computed as −[X_ABS]P).
+  // Point equality across different Z uses the same cross-multiplication test point-addition
+  // already relies on to detect "same point": X1·Z2² == X2·Z1²  &&  Y1·Z2³ == Y2·Z1³.
+
+  let X_ABS : Nat = 0xd201000000010000;
+
+  func BETA() : Nat { FpM.toMont(793479390729215512621379701633421447060886740281060493010456487427281649075476305620758731620350) };
+  func PSI_X_COEFF() : Nat { FpM.toMont(4002409555221667392624310435006688643935503118305586438271171395842971157480381377015405980053539358417135540939437) };
+  func PSI_Y() : TM.Fp2M {
+    {
+      c0 = FpM.toMont(2973677408986561043442465346520108879172042883009249989176415018091420807192182638567116318576472649347015917690530);
+      c1 = FpM.toMont(1028732146235106349975324479215795277384839936929757896155643118032610843298655225875571310552543014690878354869257);
+    };
+  };
+
+  func fp2EqLocal(a : TM.Fp2M, b : TM.Fp2M) : Bool { a.c0 == b.c0 and a.c1 == b.c1 };
+  func fp2Conj(a : TM.Fp2M) : TM.Fp2M { { c0 = a.c0; c1 = FpM.sub(0, a.c1) } };
+  func fp2Neg(a : TM.Fp2M) : TM.Fp2M { { c0 = FpM.sub(0, a.c0); c1 = FpM.sub(0, a.c1) } };
+
+  func g1EqJac(a : G1J, b : G1J) : Bool {
+    if (a.z == 0) { return b.z == 0 };
+    if (b.z == 0) { return false };
+    let z1z1 = FpM.montMul(a.z, a.z);
+    let z2z2 = FpM.montMul(b.z, b.z);
+    let u1 = FpM.montMul(a.x, z2z2);
+    let u2 = FpM.montMul(b.x, z1z1);
+    if (u1 != u2) { return false };
+    let s1 = FpM.montMul(FpM.montMul(a.y, b.z), z2z2);
+    let s2 = FpM.montMul(FpM.montMul(b.y, a.z), z1z1);
+    s1 == s2;
+  };
+
+  func g1EndoJac(p : G1J) : G1J { { x = FpM.montMul(BETA(), p.x); y = p.y; z = p.z } };
+
+  /// `p` is assumed already canonical/on-curve (call `C.g1IsCanonical`/`g1IsOnCurve` first, same
+  /// as `g1Validate` does for the slow check) — this function only replaces the subgroup test.
+  public func g1IsInSubgroupFast(p : C.G1) : Bool {
+    let j = g1FromAffine(p);
+    if (g1IsInf(j)) { return true };
+    let xP = g1Mul(j, X_ABS);
+    if (g1EqJac(xP, j)) { return false };
+    let x2P0 = g1Mul(xP, X_ABS);
+    let x2P = { x = x2P0.x; y = FpM.sub(0, x2P0.y); z = x2P0.z }; // negate Y => -[X²]P
+    let endoP = g1EndoJac(j);
+    g1EqJac(x2P, endoP);
+  };
+
+  func g2EqJac(a : G2J, b : G2J) : Bool {
+    if (fp2IsZero(a.z)) { return fp2IsZero(b.z) };
+    if (fp2IsZero(b.z)) { return false };
+    let z1z1 = TM.fp2Mul(a.z, a.z);
+    let z2z2 = TM.fp2Mul(b.z, b.z);
+    let u1 = TM.fp2Mul(a.x, z2z2);
+    let u2 = TM.fp2Mul(b.x, z1z1);
+    if (not fp2EqLocal(u1, u2)) { return false };
+    let s1 = TM.fp2Mul(TM.fp2Mul(a.y, b.z), z2z2);
+    let s2 = TM.fp2Mul(TM.fp2Mul(b.y, a.z), z1z1);
+    fp2EqLocal(s1, s2);
+  };
+
+  func g2Psi(p : G2J) : G2J {
+    let cx : TM.Fp2M = { c0 = 0; c1 = PSI_X_COEFF() };
+    {
+      x = TM.fp2Mul(cx, fp2Conj(p.x));
+      y = TM.fp2Mul(PSI_Y(), fp2Conj(p.y));
+      z = fp2Conj(p.z);
+    };
+  };
+
+  /// `p` is assumed already canonical/on-curve, same convention as `g1IsInSubgroupFast`.
+  public func g2IsInSubgroupFast(p : C.G2) : Bool {
+    let j = g2FromAffine(p);
+    if (g2IsInf(j)) { return true };
+    let xP0 = g2Mul(j, X_ABS);
+    let xP = { x = xP0.x; y = fp2Neg(xP0.y); z = xP0.z }; // X_IS_NEGATIVE => negate
+    let psiP = g2Psi(j);
+    g2EqJac(xP, psiP);
+  };
+
+  /// Differential self-check: fast vs. slow verdict on the same point. Intended to be run over
+  /// real proof/vk points (and deliberately invalid ones — wrong-subgroup, wrong-curve-order
+  /// points) under `dfx`/`pocket-ic` before `*Fast` ever replaces `g1IsInSubgroup` in production.
+  public func g1FastCheckAgrees(p : C.G1) : Bool {
+    g1IsInSubgroupFast(p) == g1IsInSubgroup(p);
+  };
+  public func g2FastCheckAgrees(p : C.G2) : Bool {
+    g2IsInSubgroupFast(p) == g2IsInSubgroup(p);
+  };
+
+  // =============================================================================================
   // The Groth16 public-input MSM: vk_x = gammaAbc[0] + Σ inputᵢ·gammaAbc[i+1], one final inversion.
   // =============================================================================================
   public func vkX(gammaAbc : [C.G1], inputs : [Nat]) : C.G1 {
