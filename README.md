@@ -17,7 +17,6 @@ verifier.
 | `motoko/src/main.mo` — **full end-to-end flow** | **Confirmed working against a live, freshly-issued challenge, not just a static fixture** | See "End-to-end live verification" below. |
 | `preupgrade`/`postupgrade` | **Real upgrade round-trip confirmed correct, including the Merkle tree structure, not just scalar stable vars** | See "Upgrade round-trip" below. |
 | Merkle inclusion with a **real, non-trivial path** (non-zero sibling, `is_right = true`) | **Confirmed correct — after finding and fixing a real bug in the test tooling** | See "Second-leaf Merkle inclusion proof" below. |
-| Admin model — **multi-principal allow-list** (`bootstrapAdmin` / `addAdmin` / `removeAdmin`) | **Implemented, typechecks with 0 errors** against real `motoko-base`/`core`; survives upgrades via the `preupgrade`/`postupgrade` entries-array pattern | See `PATCH_NOTES-admin-allowlist.md`. Not yet run on a real replica — pending a `dfx` session. |
 
 ## Independent re-verification (this review)
 

@@ -13,6 +13,18 @@ to get it to a genuinely production-ready state.
 (not just planned) — see the "Status" column below and each item's own
 `PATCH_NOTES-*.md` for what was actually done and verified.
 
+**Update 2 (security hardening pass):** a follow-on review of `main.mo` beyond
+this document's original scope found four more issues — a residual
+`bootstrapAdmin` race, an unauthenticated cycles-drain path through
+`verify`/`requestChallenge`, unbounded `challenges` growth, and the VK-rotation
+gap already listed under P3's operational hygiene bullet. All four are now
+fixed and compiled clean against a real `moc` (typecheck + full canister-WASM
+compile, not just read over by eye) — see
+`PATCH_NOTES-security-hardening.md` for the detail, the residual-risk caveats
+(the rate-limit mitigation raises attacker cost, it doesn't eliminate the
+DoS surface), and the **breaking Candid interface change** to
+`requestChallenge` (now returns a `Result`, not a bare record).
+
 ---
 
 ## 1. What this project is
