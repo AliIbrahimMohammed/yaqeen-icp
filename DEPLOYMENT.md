@@ -53,17 +53,22 @@ dfx canister install title_registry --network ic       # installs the wasm
 `dfx deploy title_registry --network ic` combines all three. On success
 dfx prints the mainnet canister id (also in `canister_ids.json`).
 
-### 2.3 Bootstrap the admin — immediately, in the same session
+### 2.3 Bootstrap the admin — controller-gated, immediately
 
-`admin` starts **unset** on a fresh canister. Call `bootstrapAdmin` before
-the canister id is shared with anyone:
+`admin` starts **unset** on a fresh canister. `bootstrapAdmin` only
+succeeds if the **caller is one of the canister's controllers**
+(checked against the management canister; fails closed if it's
+unreachable). Call it *from the deploying identity*, before the canister
+id is shared with anyone:
 
 ```bash
+dfx canister --network ic status title_registry    # confirms current controllers
 dfx canister --network ic call title_registry bootstrapAdmin '(principal "<your-principal>")'
 ```
 
-This locks permanently after the first success. Admin management from then
-on (governed by existing admins):
+The controller gate closes the first-come-first-served takeover race on a
+fresh canister id and locks permanently after the first success. Admin
+management from then on (governed by existing admins):
 
 ```bash
 dfx canister --network ic call title_registry addAdmin '(principal "<other-principal>")'
@@ -71,9 +76,14 @@ dfx canister --network ic call title_registry removeAdmin '(principal "<other-pr
 dfx canister --network ic call title_registry listAdmins '()'
 ```
 
+(In the local-replica section above, replace the plain `bootstrapAdmin`
+call with the same controller-gated form — the first `dfx` identity owns
+the deployed canister and is its controller.)
+
 ### 2.4 Configure the verifying key (ceremony output required)
 
 ```bash
+# first VK on a fresh deploy — activates immediately (deploy ceremony)
 dfx canister --network ic call title_registry setVerifyingKey '("<vk-hex>")'
 ```
 
@@ -83,11 +93,21 @@ single-party setup holds the toxic waste. Only a verifying key produced by
 a real multi-party ceremony (or a transparent-setup scheme) belongs on
 mainnet. See `README.md` → Security model.
 
+**Rotating the verifying key later is threshold-2**: one admin stages the
+replacement, then a *different* admin confirms it (or cancels):
+
+```bash
+dfx canister --network ic call title_registry setVerifyingKey '("<new-vk-hex>")'        # stages
+dfx canister --network ic call title_registry getVkStatus '()'                          # shows pending
+dfx canister --network ic call title_registry confirmVerifyingKey '("<new-vk-hex>")'    # by a 2nd admin
+# dfx canister --network ic call title_registry cancelVerifyingKeyChange '()'           # to abort instead
+```
+
 ### 2.5 Use the canister
 
 ```bash
-# register a title record (admin)
-dfx canister --network ic call title_registry submitRecord '(1, 12345, 0, 1, 0)'
+# register a title record (admin; expiry must be a future unix-seconds value)
+dfx canister --network ic call title_registry submitRecord '(1, 12345, 0, 1, 4102444800)'
 # issue a challenge (anyone)
 dfx canister --network ic call title_registry requestChallenge '(1)'
 # verify a proof (anyone; paid update call — ~20.9B instructions, multi-second)

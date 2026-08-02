@@ -7,3 +7,4 @@ NUL
 node-tests/node_modules/
 node-tests/.packages/
 node-tests/repo_run*.txt
+node-tests/run*.txt

@@ -71,11 +71,14 @@ function main() {
   report('poseidon vector', poseidonTest);
 
   console.log('=== 4. CANISTER FUNCTIONAL DRIVER (interpreter runtime) ===');
+  // Two runs: the bootstrap controller gate is stubbed ON (full functional
+  // suite) and OFF (the gate itself must reject a non-controller caller).
   // Overwrite the VFS main.mo (typecheck/wasm already done above) with the
   // driver-combined file so main.mo's relative imports still resolve.
-  mo.write('/static/motoko/src/main.mo', transformMain());
-  const driverRun = mo.run('/static/motoko/src/main.mo');
-  report('canister driver', driverRun);
+  mo.write('/static/motoko/src/main.mo', transformMain(true));
+  report('canister driver (controller-authorized)', mo.run('/static/motoko/src/main.mo'));
+  mo.write('/static/motoko/src/main.mo', transformMain(false));
+  report('canister driver (bootstrap gate off)', mo.run('/static/motoko/src/main.mo'));
 
   process.exit(failed ? 1 : 0);
 }
@@ -104,10 +107,55 @@ function report(name, r) {
 // M0220) and drive it from the SAME file: the actor declaration binds a
 // value we can call. Driver imports are hoisted above the actor (Motoko
 // requires imports before declarations).
-function transformMain() {
-  const src = fs.readFileSync(path.join(ROOT, 'motoko/src/main.mo'), 'utf8');
+//
+// bootstrapAuthorized is the canister's controller-gate oracle (management
+// canister). The node-motoko interpreter cannot make canister calls — the
+// await on "aaaaa-aa" hard-crashes it — so the production body between the
+// @stub-start/@stub-end markers in main.mo is replaced here with a
+// constant (`true`/`false`), simulating a controller-authorized or
+// unauthorized environment.
+//
+// parseVkForActivation is a second stub target: full VK validation costs a
+// pairing the interpreter cannot run (a real parse hangs past the step
+// budget — verified by probe), so the body is replaced with a fabricated
+// PreparedVk to let the VK staging/activation LOGIC be tested. The pristine
+// main.mo is what stage 1 typechecks and stage 2 wasm-compiles; only the
+// driver-run copies are stubbed.
+function transformMain(bootstrapStub) {
+  let src = fs.readFileSync(path.join(ROOT, 'motoko/src/main.mo'), 'utf8');
   if (!src.includes('persistent actor TitleRegistry {')) throw new Error('marker not found in main.mo');
-  const driver = fs.readFileSync(`${TMP}/canister_driver.mo`, 'utf8');
+  const vkStubMarker = /\/\/ @stub-start\n\s*Groth16\.parseAndPrepareVk[\s\S]*?\/\/ @stub-end/;
+  if (!vkStubMarker.test(src)) throw new Error('VK stub markers not found in main.mo');
+  const vkStubBody = [
+    '// @stub-start',
+    'ignore(hex);',
+    '?{',
+    '  alphaBetaTarget = {',
+    '    c0 = { c0 = { c0 = 0; c1 = 0 }; c1 = { c0 = 0; c1 = 0 }; c2 = { c0 = 0; c1 = 0 } };',
+    '    c1 = { c0 = { c0 = 0; c1 = 0 }; c1 = { c0 = 0; c1 = 0 }; c2 = { c0 = 0; c1 = 0 } }',
+    '  };',
+    '  gammaPrep = { infinity = true; ellCoeffs = [] };',
+    '  deltaPrep = { infinity = true; ellCoeffs = [] };',
+    '  gammaAbc = [];',
+    '};',
+    '// @stub-end',
+  ].join('\n    ');
+  src = src.replace(vkStubMarker, vkStubBody);
+  const bootStubMarker = /\/\/ @stub-start[\s\S]*?\/\/ @stub-end/;
+  if (!bootStubMarker.test(src)) throw new Error('bootstrap stub markers not found in main.mo');
+  src = src.replace(
+    bootStubMarker,
+    '// @stub-start\n    ignore(caller);\n    ' + String(bootstrapStub) + '\n    // @stub-end',
+  );
+  let driver = fs.readFileSync(`${TMP}/canister_driver.mo`, 'utf8');
+  // Inject the arkworks fixture (real VK hex from circuit/wire_export.json)
+  // so the VK staging-flow tests operate on a genuinely valid key.
+  const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'circuit/wire_export.json'), 'utf8'));
+  // Replace EVERY occurrence: the driver's header comment also quotes the
+  // literal "@FIXTURE_VK@", and String.replace alone would only swap the
+  // first match, leaving the real binding as the placeholder (len 12).
+  driver = driver.split('@FIXTURE_VK@').join(fixture.vkHex);
+  driver = driver.replace('let TEST_BOOTSTRAP_MODE : Bool = true;', `let TEST_BOOTSTRAP_MODE : Bool = ${String(bootstrapStub)};`);
   // Hoist driver imports above the actor, dropping any that main.mo already
   // declares (duplicate bindings, M0017).
   const usedAliases = new Set();

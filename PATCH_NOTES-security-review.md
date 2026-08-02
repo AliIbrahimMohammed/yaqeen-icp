@@ -22,7 +22,11 @@ that further to the review's preferred shape:
 - Typechecked: 0 errors on `main.mo`, `verify_test/main.mo`,
   `Groth16MultiTest.mo` (node-motoko `moc` + real base/core sources).
 
-Remaining (tracked): threshold/multi-sig admin scheme (P3).
+Remaining (tracked): full threshold/multi-sig admin scheme (P3). Round 3
+went further and gated `bootstrapAdmin` itself to the canister's
+controllers (management-canister oracle, fails closed) — closing the
+fresh-deploy first-come-first-served takeover race entirely; see
+`PATCH_NOTES-security-round3.md`.
 
 ### 2. Groth16 trusted setup is dev-only — **PARTIALLY ADDRESSED (code side)**
 

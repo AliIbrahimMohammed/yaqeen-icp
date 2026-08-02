@@ -141,8 +141,9 @@ install, `ic0.app`): see [DEPLOYMENT.md](DEPLOYMENT.md).
 ### 5. Run the test suite without dfx
 
 `node-tests/` typechecks every Motoko target, wasm-compiles the canister,
-and runs a Poseidon differential vector plus a 20-check functional driver
-(admin bootstrap/rotation, registry roots, challenge issuance, `verify`
+and runs a Poseidon differential vector plus a ~50-check functional driver
+(admin bootstrap/rotation incl. the controller gate, record validation +
+provenance, VK staging/activation, challenge cap, Merkle roots, `verify`
 rejection ordering) inside node-motoko's interpreter — no dfx or cargo
 needed:
 
@@ -150,17 +151,33 @@ needed:
 bash node-tests/run-tests.sh
 ```
 
+Run it twice per suite: once with the controller-gate oracle stubbed
+**on** (full functional suite) and once **off** (proves a non-controller
+caller cannot bootstrap the registry). Two deeper caveats, kept honest in
+`PATCH_NOTES-security-round3.md`: real pairing paths and the canister-call
+oracle can't execute inside the interpreter, so those are covered by the
+driver's stub points and must be smoke-tested on a real `dfx` replica.
+
 ## Canister API
 
 | Method | Access | Purpose |
 |---|---|---|
-| `bootstrapAdmin(principal)` | anyone, once | Seed the admin allow-list (locks permanently) |
+| `bootstrapAdmin(principal)` | **canister controller**, once | Seed the admin allow-list (locks permanently) |
 | `addAdmin(principal)` | any admin | Add a principal to the admin allow-list |
 | `removeAdmin(principal)` | any admin | Revoke admin (never the last one) |
 | `listAdmins()` | anyone (query) | Current admin allow-list |
-| `submitRecord(...)` | admin | Insert a title record; returns new Merkle root |
-| `requestChallenge(purpose)` | anyone | Issue a challenge bound to the current root |
+| `submitRecord(...)` | admin | Insert a validated title record (provenance recorded); returns new Merkle root |
+| `requestChallenge(purpose)` | anyone | Issue a challenge bound to the current root (capped at 500 pending) |
 | `verify(...)` | anyone | Submit proof + public inputs; returns a nullifier or error |
+| `setVerifyingKey(hex)` | admin | First VK activates; replacements are **staged** pending confirmation |
+| `confirmVerifyingKey(hex)` | admin (≠ proposer) | Activate a staged VK replacement (threshold-2) |
+| `cancelVerifyingKeyChange()` | admin | Discard a staged VK replacement |
+| `getCurrentRoot()` | anyone (query) | Current registry Merkle root |
+| `getRecord(propertyId)` | anyone (query) | Record lookup (incl. provenance) |
+| `getChallenge(challengeId)` | anyone (query) | Challenge lookup |
+| `getVkStatus()` | anyone (query) | Active/pending verifying-key state |
+| `getAuditLog()` | anyone (query) | Capped (1000) admin/record audit trail |
+| `getStats()` | anyone (query) | Records, challenges, spent nullifiers, root, next leaf |
 
 ## Security model
 
@@ -171,13 +188,23 @@ bash node-tests/run-tests.sh
   only ever sees its Poseidon commitment.
 - **Challenge binding** — public inputs must match the issued challenge
   *before* any cryptographic verification runs; mismatches fail at the
-  input-matching stage.
+  input-matching stage (registry → purpose → nonce ordering).
 - **Replay protection** — each challenge is consumed exactly once; a failed
   verification does not burn the challenge.
-- **Admin model** — multi-principal allow-list: seeded once via
-  `bootstrapAdmin`, governed thereafter via `addAdmin`/`removeAdmin`
-  (the last admin can never be removed). Not yet a threshold scheme
-  (tracked in the roadmap).
+- **Bootstrap integrity** — `bootstrapAdmin` is gated to the canister
+  controllers (management-canister oracle, fails closed), closing the
+  fresh-deploy takeover race; the sentinel locks permanently after the
+  first success.
+- **Admin model** — multi-principal allow-list, governed by existing
+  admins; the last admin can never be removed. **Verifying-key
+  replacements are threshold-2** (staged by one admin, confirmed by a
+  different one), so a single compromised admin can't swap in a key they
+  control. A full multi-sig *admin* scheme remains future work.
+- **Record integrity** — every `submitRecord` is field-validated
+  (canonical commitment, flag enums, future expiry, nonzero propertyId)
+  and stamped with `submittedBy`/`submittedAt` for attribution.
+- **Flood resistance** — pending challenges capped (500) with an
+  opportunistic expired-challenge sweep, and the audited log is capped.
 
 ### Known caveats (honest)
 
@@ -209,8 +236,8 @@ accordingly or invest in verification batching / a cheaper proof system.
 ## Roadmap
 
 1. **Multi-party trusted-setup ceremony** — non-negotiable before real value.
-2. **Admin model hardening** — threshold/multi-sig scheme on top of the
-   landed allow-list.
+2. **Admin threshold scheme** — VK changes are already threshold-2; a multi-sig
+   threshold model for admin *actions* (submit, add/remove admin) is next.
 3. **`mops install` for real** — mops' own integrity/version guarantees.
 4. **Cost/latency optimization** — batching or a cheaper curve/proof system.
 5. **Mainnet deployment dry run** — cycles budgeting, subnet selection.
