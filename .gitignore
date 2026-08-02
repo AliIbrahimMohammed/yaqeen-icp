@@ -4,3 +4,6 @@ circuit/verifying_key.bin
 circuit/prove_live2_output.json
 .dfx/
 NUL
+node-tests/node_modules/
+node-tests/.packages/
+node-tests/repo_run*.txt

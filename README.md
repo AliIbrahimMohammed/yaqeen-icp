@@ -70,6 +70,8 @@ bridge, no oracle, no off-chain trust assumption on the verifier.
 | `motoko/src/groth16/` | `TitleGroth16.mo` adapter + vendored BLS12-381 Groth16 verifier (`vendor/`) |
 | `verify_test/` | Standalone canister for direct `Groth16Wire.tryVerify` tests |
 | `perf-testing/` | Instruction-cost measurement artifacts (orig/patched wasm, WASI runner) |
+| `node-tests/` | dfx-free test suite (node-motoko): typecheck, wasm compile, Poseidon vector, canister driver |
+| `DEPLOYMENT.md` | Local + mainnet deployment runbook |
 | `dfx.json` | Canister definitions (`title_registry`, `verify_test`) |
 
 ## Status
@@ -133,7 +135,20 @@ dfx canister call title_registry verify '(record { challengeId = ...; proof = bl
 ```
 
 See `circuit/src/bin/prove_live.rs` and `motoko/src/main.mo` for the exact
-shapes.
+shapes. Full mainnet walkthrough (cycles, `--network ic`, per-canister
+install, `ic0.app`): see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+### 5. Run the test suite without dfx
+
+`node-tests/` typechecks every Motoko target, wasm-compiles the canister,
+and runs a Poseidon differential vector plus a 20-check functional driver
+(admin bootstrap/rotation, registry roots, challenge issuance, `verify`
+rejection ordering) inside node-motoko's interpreter — no dfx or cargo
+needed:
+
+```bash
+bash node-tests/run-tests.sh
+```
 
 ## Canister API
 
