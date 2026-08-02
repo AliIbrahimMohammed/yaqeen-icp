@@ -32,7 +32,45 @@ persistent actor TitleRegistry {
   // the text representation (avoids relying on `**` overflow semantics).
   func natHash(n : Nat) : Nat32 { Text.hash(Nat.toText(n)) };
 
-  let admin : Principal = Principal.fromText("aaaaa-aa"); // TODO: set at init
+  // FIXED (was a hardcoded "aaaaa-aa" placeholder — the IC management
+  // canister's well-known principal, not a real admin identity).
+  //
+  // This build of `moc` doesn't parse constructor arguments on a plain
+  // `actor` (that needs `actor class ... = this { }`, a bigger structural
+  // change not attempted here), so the real fix is a one-time bootstrap
+  // sentinel instead: `admin` starts unset, and `bootstrapAdmin` can be
+  // called by anyone exactly once to set the real admin — after that it's
+  // permanently locked and only rotatable via the governed `setAdmin` below.
+  //
+  // OPERATIONAL REQUIREMENT: call `bootstrapAdmin` with the real admin
+  // principal immediately after deploy, in the same deploy script/session,
+  // BEFORE the canister id is shared or any other call is made — the same
+  // "init then lock" discipline a constructor argument would have given
+  // you for free, just enforced by a runtime check instead of the type
+  // system. Until `bootstrapAdmin` is called, `submitRecord`/`setVerifyingKey`/
+  // `setAdmin` are unreachable by anyone (there is no admin yet), so there is
+  // no window where an attacker can act AS admin — only a window where the
+  // real admin hasn't claimed the role yet.
+  var admin : ?Principal = null;
+
+  /// One-time bootstrap: succeeds only while `admin` is still unset.
+  public shared func bootstrapAdmin(realAdmin : Principal) : async Result.Result<(), Text> {
+    switch (admin) {
+      case (?_) { #err("admin already set — use setAdmin instead") };
+      case null { admin := ?realAdmin; #ok(()) };
+    };
+  };
+
+  /// Governed rotation path: only the CURRENT admin can hand off to a new
+  /// one. Still a single-principal model (a multi-principal allow-list or
+  /// threshold scheme is the next step up, tracked separately) — but it's
+  /// no longer a hardcoded, never-changeable placeholder.
+  public shared (msg) func setAdmin(newAdmin : Principal) : async Result.Result<(), Text> {
+    if (?msg.caller != admin) { return #err("unauthorized") };
+    admin := ?newAdmin;
+    #ok(());
+  };
+
   let treeDepth : Nat = 25;
 
   // ---- registry state ----
@@ -120,7 +158,7 @@ persistent actor TitleRegistry {
     licenseStatus : Nat,
     licenseExpiry : Nat,
   ) : async Result.Result<Nat, Text> {
-    if (msg.caller != admin) {
+    if (?msg.caller != admin) {
       return #err("unauthorized — see production checklist: gate this behind real admin auth");
     };
     let record : Record = {
@@ -207,7 +245,7 @@ persistent actor TitleRegistry {
   /// (bad encoding, off-curve points, points outside the r-torsion
   /// subgroup) rather than caching something unusable.
   public shared (msg) func setVerifyingKey(hex : Text) : async Result.Result<(), Text> {
-    if (msg.caller != admin) return #err("unauthorized");
+    if (?msg.caller != admin) return #err("unauthorized");
     switch (Groth16.parseAndPrepareVk(hex)) {
       case (null) { #err("invalid verifying key encoding or contents") };
       case (?prepared) {

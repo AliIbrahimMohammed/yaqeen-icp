@@ -1,0 +1,9 @@
+[package]
+name = "wasi_runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.104"
+wasmtime = "=13.0.0"
+wasmtime-wasi = "=13.0.0"

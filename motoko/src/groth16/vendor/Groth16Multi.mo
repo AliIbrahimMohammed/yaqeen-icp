@@ -284,8 +284,8 @@ module {
       i += 1;
     };
 
-    // Pair schedule (order identical to multiMillerRaw — see the 3-pair note below):
-    //   0: (A, B)   1: (−vk_x, gamma)   2: (−C, delta)
+    // Pair schedule (order identical to multiMillerRaw):
+    //   0: (A, B)   1: (−vk_x, gamma)   2: (−C, delta)   3: (alphaNeg, beta)
     var liveA = false;
     switch (a) {
       case (#inf) {};
