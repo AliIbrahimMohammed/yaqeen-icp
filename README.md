@@ -281,8 +281,21 @@ against what the vendored `Groth16Wire.parseProof` / `parseAndPrepareVk` /
 5. **Mainnet deployment dry run** (cycles budgeting, subnet selection,
    canister settings) once the ceremony and admin model above are in place.
 6. **Re-run the dfx/pocket-ic tests from a machine with dfx access** to
-   corroborate this session's claims with a second, independent run —
-   this review could not do that part. `circuit/src/bin/verify_prove2`
-   (new) covers the pure-cryptography half of that gap in the meantime;
-   it does not touch the canister/replica layer at all.
+   corroborate these claims with a second, independent run — this review
+   could not do that part. `circuit/src/bin/verify_prove2` covers the
+   pure-cryptography half of that gap in the meantime; it does not touch
+   the canister/replica layer at all.
+
+## License
+
+Provided under the [MIT License](LICENSE). The BLS12-381 Groth16 verifier
+under `motoko/src/groth16/vendor/` is vendored **unmodified** and carries its
+own MIT attribution — see
+[`motoko/src/groth16/vendor/ATTRIBUTION.md`](motoko/src/groth16/vendor/ATTRIBUTION.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security-sensitive? Read
+[SECURITY.md](SECURITY.md) and report vulnerabilities privately rather than in
+a public issue.
 
