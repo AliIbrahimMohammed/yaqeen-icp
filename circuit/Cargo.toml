@@ -16,6 +16,7 @@ ark-serialize = "0.4"
 ark-snark = "0.4"
 rand = "0.8"
 rand_chacha = "0.3"
+serde_json = "1"
 
 [[bin]]
 name = "setup"
@@ -52,3 +53,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "oracle_alphabeta"
 path = "src/bin/oracle_alphabeta.rs"
+
+[[bin]]
+name = "oracle_pin_fixture"
+path = "src/bin/oracle_pin_fixture.rs"
+
+[[bin]]
+name = "oracle_subgroup_jacobian"
+path = "src/bin/oracle_subgroup_jacobian.rs"

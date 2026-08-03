@@ -13,18 +13,6 @@ to get it to a genuinely production-ready state.
 (not just planned) — see the "Status" column below and each item's own
 `PATCH_NOTES-*.md` for what was actually done and verified.
 
-**Update 2 (security hardening pass):** a follow-on review of `main.mo` beyond
-this document's original scope found four more issues — a residual
-`bootstrapAdmin` race, an unauthenticated cycles-drain path through
-`verify`/`requestChallenge`, unbounded `challenges` growth, and the VK-rotation
-gap already listed under P3's operational hygiene bullet. All four are now
-fixed and compiled clean against a real `moc` (typecheck + full canister-WASM
-compile, not just read over by eye) — see
-`PATCH_NOTES-security-hardening.md` for the detail, the residual-risk caveats
-(the rate-limit mitigation raises attacker cost, it doesn't eliminate the
-DoS surface), and the **breaking Candid interface change** to
-`requestChallenge` (now returns a `Result`, not a bare record).
-
 ---
 
 ## 1. What this project is
@@ -75,7 +63,7 @@ admin identity. The code flags this itself. Right now `submitRecord` and
 - **Blocking:** everything else. This should land before any other item on this
   list is considered "in progress."
 
-**2.2 — Dev-only trusted setup**
+**2.2 — Dev-only trusted setup — ⚠️ MECHANICS BUILT + TESTED; REAL CEREMONY STILL NOT RUN**
 
 `circuit/src/bin/setup.rs` says so itself:
 ```
@@ -85,11 +73,28 @@ Whoever ran that binary holds the "toxic waste" and can forge arbitrary
 valid-looking proofs for any statement. For a title registry this is
 existential, not cosmetic.
 
-- **Action:** run a real multi-party ceremony — Phase-1 powers-of-tau +
-  Phase-2 circuit-specific contribution, several independent contributors,
-  at least one verifiably destroying their randomness — or move to a
-  universal/transparent setup scheme.
-- **Owner:** cryptography lead + at least 2–3 independent external contributors.
+- **Action taken:** a real `ceremony/` Rust crate (`ceremony_init` /
+  `ceremony_contribute` / `ceremony_verify`) implementing the standard
+  delta-only Groth16 Phase-2 MPC (same structure as Zcash Sapling /
+  Filecoin / Semaphore), built on `ark-groth16`'s own real API. Independently
+  re-verified in this pass, not just taken on faith: compiled clean, ran a
+  full 3-round chain (init + two contributions) end to end, confirmed
+  `ceremony_verify` accepts the honest chain and rejects a tampered one
+  (real nonzero exit code), and confirmed the ceremony's *final* proving/
+  verifying key actually produces a valid proof that `verify_smoke` accepts
+  — and correctly rejects inconsistent/tampered inputs — via a fresh,
+  independent `prove` + `verify_smoke` run against the ceremony-derived key.
+  See `PATCH_NOTES-ceremony-and-provenance.md` and `CEREMONY_SPEC.md`.
+- **What this does NOT close:** `alpha`/`beta`/`gamma` are still fixed once,
+  at `ceremony_init`, by whoever runs it — this tool only rotates `delta`
+  across participants (the real Phase-2-equivalent trust dependency).
+  Closing that needs either reusing an existing audited Powers-of-Tau
+  transcript, or a real Phase-1 ceremony with independent, non-colluding
+  human participants — not something achievable by tooling alone, and not
+  attempted here.
+- **Owner:** cryptography lead + at least 2–3 independent external contributors
+  for both the real delta-rotation rounds (using the now-tested `ceremony/`
+  crate) and, separately, sourcing/combining a real Phase-1 transcript.
 - **Blocking:** any real property data touching the system.
 
 ---
@@ -192,3 +197,47 @@ P0 items are independent of each other and can run in parallel. P1 is a
 single gating event (the first real `dfx`/`pocket-ic` access). P2 depends on
 P1's confirmation. P3 items are largely independent of each other and can be
 picked up opportunistically once P0–P2 are settled.
+
+---
+
+## 4. Patch notes index
+
+Every fix in this document has a corresponding `PATCH_NOTES-*.md` at the repo
+root with exactly what changed, what was actually run/verified vs. only
+typechecked, and what's still open:
+
+- `PATCH_NOTES-alphabeta-precompute.md` — Groth16 verifier, 3-pair vs 4-pair
+  Miller loop (P1/performance).
+- `PATCH_NOTES-fast-subgroup-check.md` — endomorphism-based fast subgroup
+  check, additive alongside the slow literal check (P2).
+- `PATCH_NOTES-admin-bootstrap.md` / `PATCH_NOTES-admin-allowlist.md` —
+  hardcoded admin principal → one-time bootstrap → multi-principal
+  allow-list (P0.1/P3).
+- `PATCH_NOTES-ceremony-and-provenance.md` — the delta-only Phase-2 ceremony
+  toolkit (P0.2, mechanics only — see 2.2 above), plus the `base`/`core`
+  package-provenance fix in `package_flags.sh` (new, folded in below).
+
+**New in this pass — package provenance (folded into general productization):**
+`package_flags.sh` previously pointed `moc` at whatever `base`/`core` a local
+`dfx cache install` happened to have, with no check that it matched
+`mops.toml`'s declared versions and no recorded hash — so two machines (or
+one machine after a `dfx` upgrade) could silently typecheck/compile against
+different library sources. Rewritten to pin both packages to specific
+upstream git refs, fetch them via `codeload.github.com` (reachable; the real
+`mops` registry at `icp-api.io` is not, from this sandbox), and check a
+recorded content hash (`mops.lock.json`) on every run — refusing to proceed,
+not just warning, on a mismatch. Independently re-verified in this pass: a
+fresh run (empty cache) fetches and records a hash that matches the shipped
+`mops.lock.json` exactly; a second run confirms the match; a deliberately
+corrupted cache file causes a real `FATAL` failure with nonzero exit code,
+not a silent continue. The full Motoko project was then re-typechecked
+end-to-end using these exact freshly-fetched sources — 0 errors, confirming
+the two halves of this project (crypto patches + provenance fix) actually
+work together, not just sit side by side.
+
+**Honest residual gap (stated in the script's own comments):** the pinned
+git refs are a reasonable, standard inference from `mops.toml`'s declared
+versions (the same inference `dfx cache install` itself relies on), not a
+guarantee from the real `mops` registry, which this sandbox cannot reach.
+Closing that last gap needs `mops install` run from a machine with mainnet
+access, diffed against `mops.lock.json`.

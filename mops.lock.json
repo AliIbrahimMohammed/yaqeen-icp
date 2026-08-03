@@ -1,0 +1,10 @@
+{
+  "base": {
+    "pinned_ref": "caffeinelabs/motoko-base@moc-0.13.5",
+    "tree_sha256": "5d101ab03b7144d4de133d3f2c00d2c9c7075b0fad222dd6dece25ed9e3deb66"
+  },
+  "core": {
+    "pinned_ref": "dfinity/motoko-core@v2.5.0",
+    "tree_sha256": "e48816adfff84ca8dd7fefb569a3a3df6cbee047cebc06024c644d10f3c19fda"
+  }
+}
