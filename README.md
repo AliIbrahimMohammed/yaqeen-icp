@@ -1,5 +1,17 @@
 # Yaqeen on ICP
 
+<p align="center">
+  <img alt="Motoko" src="https://img.shields.io/badge/Motoko-0.13.5-3C3C3C">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75-orange">
+  <img alt="Internet Computer" src="https://img.shields.io/badge/Internet%20Computer-ICP-29AFF2">
+  <img alt="Runs on ICP" src="https://img.shields.io/badge/Runs%20on-ICP%20mainnet-29AFF2">
+  <img alt="dfx" src="https://img.shields.io/badge/dfx-0.32-00B0FF">
+  <img alt="Groth16" src="https://img.shields.io/badge/Groth16-SNARK-6B8E23">
+  <img alt="BLS12-381" src="https://img.shields.io/badge/BLS12--381-zk--Curve-448AFF">
+  <img alt="Poseidon" src="https://img.shields.io/badge/Poseidon-Hash-7A85EE">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
+</p>
+
 **Zero-knowledge property-title verification on the Internet Computer.**
 
 A Motoko canister that issues challenges and verifies **BLS12-381 Groth16
