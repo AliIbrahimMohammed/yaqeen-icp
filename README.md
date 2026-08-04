@@ -6,6 +6,7 @@
   <img alt="Internet Computer" src="https://img.shields.io/badge/Internet%20Computer-ICP-29AFF2">
   <img alt="Runs on ICP" src="https://img.shields.io/badge/Runs%20on-ICP%20mainnet-29AFF2">
   <img alt="dfx" src="https://img.shields.io/badge/dfx-0.32-00B0FF">
+  <img alt="CI" src="https://github.com/AliIbrahimMohammed/yaqeen-icp/actions/workflows/ci.yml/badge.svg">
   <img alt="Groth16" src="https://img.shields.io/badge/Groth16-SNARK-6B8E23">
   <img alt="BLS12-381" src="https://img.shields.io/badge/BLS12--381-zk--Curve-448AFF">
   <img alt="Poseidon" src="https://img.shields.io/badge/Poseidon-Hash-7A85EE">
@@ -261,6 +262,27 @@ dfx deploy
 > unreachable from the build sandbox. Run `mops install` on a machine with
 > mainnet access and diff the result against `mops.lock.json`.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` re-runs the verification claims on every push/PR:
+
+- **circuit** — `cargo build --release` + crate tests, then the full
+  `setup → prove → verify_smoke → verify_prove2` pipeline (in a scratch
+  dir, so committed fixtures are never overwritten) with hard assertions
+  on the accept/reject outputs. The crates have no Rust unit tests —
+  differential coverage lives in the oracle binaries
+  (`oracle_alphabeta`/`oracle_subgroup_jacobian`/`oracle_pin_fixture`)
+  and the `verify_test` fixture harness; the pipeline assertions are the
+  real gate.
+- **ceremony** — `cargo build --release` + crate tests.
+- **motoko** — `dfx build` through `package_flags.sh`, whose pinned
+  base/core content hashes must match `mops.lock.json` (the build fails
+  loudly on drift), plus a working-tree-dirtiness guard.
+- **replica-smoke** — deploys `title_registry` on a real local replica and
+  runs the leaf-update regression: a resubmitted property must keep its
+  leaf index (update in place) while the root changes, and unknown
+  properties must return `null`.
+
 ---
 
 ## Deployment checklist
@@ -305,6 +327,31 @@ Full detail in `ROADMAP.md` and each `PATCH_NOTES-*.md`.
   reachable from the build sandbox), not the mops registry itself.
 - The vendored verifier is **unmodified** upstream code — any fix must go
   upstream, not be forked here.
+- **No independent audit** of the circuit's R1CS/QAP construction or the
+  vendored Groth16 verifier has been performed — differential testing
+  catches implementation bugs, not protocol-level issues.
+- **Throttling is a floor, not a complete DoS solution** — 2s/principal on
+  `requestChallenge`/`verify` plus anonymous-caller rejection (see
+  `PATCH_NOTES-leaf-update-and-hardening.md`) stops the cheap version of a
+  cycles-drain attack; a real deployment should still budget cycles, alert
+  on anomalous call volume, and consider a boundary-level rate limiter.
+
+Previously-open items now fixed — see
+`PATCH_NOTES-leaf-update-and-hardening.md` for detail:
+- ~~Resubmitting a property appended a new leaf without invalidating the
+  old one, so a stale record stayed permanently provable.~~ Fixed:
+  `submitRecord` now updates a property's existing leaf in place.
+- ~~No client-facing way to fetch a Merkle witness.~~ Fixed: `getRecord`
+  and `getMerkleProof` query endpoints added.
+- ~~`SECURITY.md` claimed per-principal throttling and anonymous-caller
+  rejection that didn't exist in code.~~ Fixed: both are now implemented
+  and match the doc.
+- ~~`challenges` grew without bound.~~ Fixed: a `heartbeat` prunes expired
+  entries.
+- ~~No CI — verification claims were point-in-time, not continuously
+  re-checked.~~ Fixed: `.github/workflows/ci.yml` re-runs the circuit
+  pipeline, Motoko typecheck, and a replica leaf-update regression on
+  every push/PR (see *Building and testing → Continuous integration*).
 
 ---
 
