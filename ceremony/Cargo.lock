@@ -673,6 +673,7 @@ dependencies = [
  "ark-std",
  "rand",
  "rand_chacha",
+ "serde_json",
 ]
 
 [[package]]

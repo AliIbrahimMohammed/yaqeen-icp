@@ -6,7 +6,6 @@
   <img alt="Internet Computer" src="https://img.shields.io/badge/Internet%20Computer-ICP-29AFF2">
   <img alt="Runs on ICP" src="https://img.shields.io/badge/Runs%20on-ICP%20mainnet-29AFF2">
   <img alt="dfx" src="https://img.shields.io/badge/dfx-0.32-00B0FF">
-  <img alt="CI" src="https://github.com/AliIbrahimMohammed/yaqeen-icp/actions/workflows/ci.yml/badge.svg">
   <img alt="Groth16" src="https://img.shields.io/badge/Groth16-SNARK-6B8E23">
   <img alt="BLS12-381" src="https://img.shields.io/badge/BLS12--381-zk--Curve-448AFF">
   <img alt="Poseidon" src="https://img.shields.io/badge/Poseidon-Hash-7A85EE">
@@ -14,6 +13,13 @@
 </p>
 
 **Zero-knowledge property-title verification on the Internet Computer.**
+
+> `.github/workflows/ci.yml` builds/tests both Rust crates, runs the
+> circuit's full accept/reject verification pipeline, `dfx build`s the
+> Motoko side, and deploys to a real local replica to re-run the
+> leaf-update/throttle/upgrade regressions — on every push/PR. (No CI
+> badge here: this checkout has no `git remote` to point one at; add one
+> once this is pushed to its actual GitHub repo.)
 
 A Motoko canister that issues challenges and verifies **BLS12-381 Groth16
 proofs natively on-chain** — no bridge, no off-chain verifier trust. The proof
@@ -262,27 +268,6 @@ dfx deploy
 > unreachable from the build sandbox. Run `mops install` on a machine with
 > mainnet access and diff the result against `mops.lock.json`.
 
-### Continuous integration
-
-`.github/workflows/ci.yml` re-runs the verification claims on every push/PR:
-
-- **circuit** — `cargo build --release` + crate tests, then the full
-  `setup → prove → verify_smoke → verify_prove2` pipeline (in a scratch
-  dir, so committed fixtures are never overwritten) with hard assertions
-  on the accept/reject outputs. The crates have no Rust unit tests —
-  differential coverage lives in the oracle binaries
-  (`oracle_alphabeta`/`oracle_subgroup_jacobian`/`oracle_pin_fixture`)
-  and the `verify_test` fixture harness; the pipeline assertions are the
-  real gate.
-- **ceremony** — `cargo build --release` + crate tests.
-- **motoko** — `dfx build` through `package_flags.sh`, whose pinned
-  base/core content hashes must match `mops.lock.json` (the build fails
-  loudly on drift), plus a working-tree-dirtiness guard.
-- **replica-smoke** — deploys `title_registry` on a real local replica and
-  runs the leaf-update regression: a resubmitted property must keep its
-  leaf index (update in place) while the root changes, and unknown
-  properties must return `null`.
-
 ---
 
 ## Deployment checklist
@@ -291,13 +276,20 @@ Before any real value touches this chain:
 
 1. **Real multi-party trusted setup** — never deploy the `setup.rs` dev key;
    complete `CEREMONY_SPEC.md` steps using real, independent participants.
+   (The tooling itself has been run and tamper-tested — see patch notes —
+   but that's not a substitute for step 1 actually happening with real
+   people.)
 2. **Provision the admin** — call `bootstrapAdmin(principal)` in the same
    deploy session, before sharing the canister id.
 3. **Confirm package sources** (`mops install` vs `mops.lock.json`).
 4. **Budget the cost model** — preparation cycles and latency for ~21B
    `/verify` calls if volume is non-trivial.
-5. **Re-run the dfx/pocket-ic suite** from a machine with `dfx` access, to
-   corroborate the replica-level sessions that could not run in this sandbox.
+5. ~~Re-run the dfx/pocket-ic suite from a machine with `dfx` access~~ Done:
+   a real `dfx`/`pocket-ic` session ran the leaf-update, throttle/anonymous,
+   and upgrade-safety regressions against a live local replica (see patch
+   notes); `.github/workflows/ci.yml` now re-runs this on every push/PR.
+   Still worth doing once against **mainnet** specifically before real
+   value touches it, since a local replica isn't identical to mainnet.
 
 ---
 
@@ -306,12 +298,13 @@ Before any real value touches this chain:
 - **P0.1** Admin allow-list — implemented (`bootstrapAdmin` + allow-list,
   typechecked 0 errors; add/remove governed, last-admin protected).
 - **P0.2** Trusted setup — mechanics built + independently re-tested
-  (`ceremony/`); **real multi-party ceremony still not run** (needs humans).
+  (`ceremony/`), including live tamper tests; **real multi-party ceremony
+  still not run** (needs humans).
 - **P1** Validate alpha/beta precompute and fast subgroup check on a real
-  replica (first real `dfx` access).
+  replica — done (see patch notes' replica-verification session).
 - **P2** Wire the fast subgroup check into the hot path; re-measure.
 - **P3** BN254 migration, batch verify, ops hardening (monitoring, key
-  rotation procedure, CI).
+  rotation procedure). ~~CI~~ done — see `.github/workflows/ci.yml`.
 
 Full detail in `ROADMAP.md` and each `PATCH_NOTES-*.md`.
 
@@ -322,14 +315,29 @@ Full detail in `ROADMAP.md` and each `PATCH_NOTES-*.md`.
 - **Verification is expensive** (~21B instr, ~3 DTS rounds) — acceptable for
   low volume; budget cycles and latency accordingly if volume grows.
 - **No real trusted-multi-party ceremony has run yet** — the highest-stakes
-  open item.
+  open item. The ceremony tooling itself has been exercised end-to-end,
+  including two tamper tests confirming `ceremony_verify` catches forged
+  transcripts (see `PATCH_NOTES-leaf-update-and-hardening.md`'s "Multi-party
+  trusted setup" section) — but a tooling test by one party is not a
+  ceremony; it still needs real, independent, non-colluding participants.
 - **Package provenance** is pinned to codeload GitHub refs (the best that's
-  reachable from the build sandbox), not the mops registry itself.
+  reachable from the build sandbox), not the mops registry itself. Both
+  pinned hashes in `mops.lock.json` have been independently reproduced
+  from scratch (see patch notes) — provenance-by-hash-pinning checks out,
+  which is a narrower claim than "sourced from the mops registry."
 - The vendored verifier is **unmodified** upstream code — any fix must go
   upstream, not be forked here.
 - **No independent audit** of the circuit's R1CS/QAP construction or the
-  vendored Groth16 verifier has been performed — differential testing
-  catches implementation bugs, not protocol-level issues.
+  vendored Groth16 verifier has been performed. A supplementary adversarial
+  read-through of the circuit constraints and the verifier's proof-point
+  validation/public-input reduction was done and found nothing (see patch
+  notes) — that is explicitly *not* a substitute for an independent audit,
+  since it wasn't independent and didn't cover the ~4,000 lines of vendored
+  field/curve/pairing arithmetic.
+- ~~No CI~~ Fixed: `.github/workflows/ci.yml` builds/tests both Rust
+  crates, runs the circuit's accept/reject pipeline, `dfx build`s the
+  Motoko side, and deploys to a real replica to re-run the leaf-update/
+  throttle/upgrade regressions, on every push/PR.
 - **Throttling is a floor, not a complete DoS solution** — 2s/principal on
   `requestChallenge`/`verify` plus anonymous-caller rejection (see
   `PATCH_NOTES-leaf-update-and-hardening.md`) stops the cheap version of a
@@ -348,10 +356,6 @@ Previously-open items now fixed — see
   and match the doc.
 - ~~`challenges` grew without bound.~~ Fixed: a `heartbeat` prunes expired
   entries.
-- ~~No CI — verification claims were point-in-time, not continuously
-  re-checked.~~ Fixed: `.github/workflows/ci.yml` re-runs the circuit
-  pipeline, Motoko typecheck, and a replica leaf-update regression on
-  every push/PR (see *Building and testing → Continuous integration*).
 
 ---
 

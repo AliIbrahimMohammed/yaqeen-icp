@@ -156,63 +156,131 @@ timed out).
 ## What this does not fix
 
 Real multi-party trusted setup and independent audit of the circuit and
-vendored verifier are still open — see `README.md`'s Deployment checklist
-and `SECURITY.md`. This patch addresses the functional-correctness and
-DoS-surface gaps found in this review; it does not touch cryptographic
-trust assumptions.
+vendored verifier are still open in the sense that matters — see below for
+exactly what was and wasn't done about each, and about CI.
 
-**Update 3 (supplementary, third machine):** the Rust side has now also
-been built and exercised for real — `rustc/cargo 1.75.0` (matching the
-README's Rust badge) — with the ceremony tooling and the circuit pipeline
-run end-to-end from source:
+### CI — actually added, not simulated
 
-- `ceremony/` builds clean. A full simulated Phase-2 ceremony was run
-  through the actual tooling: `ceremony_init` (round 0, `delta=1` by
-  construction, seeded from simulated multi-party entropy files plus a
-  beacon value) then three `ceremony_contribute` rounds (Alice/Bob/Carol,
-  each labeled SIMULATION ONLY — one sandbox, not independent parties).
-  `ceremony_verify` reports `OK — chain verifies end to end` across all 4
-  rounds and prints the final `delta_g1`/`delta_g2` and vk fingerprint.
-  This is a mechanism demo, not a real ceremony — the single party running
-  it holds the full toxic waste. The real ceremony still requires
-  independent participants per `CEREMONY_SPEC.md`.
-- The verifier actually verifies, confirmed three ways: (1) a flipped
-  byte in `round_2.pk.bin` is caught by the params hash check; (2) a lie
-  in `transcript.json` (claimed delta values swapped between rounds) is
-  caught by the `entry_hash` chain; (3) the definitive test — a forged
-  round where the delta/contribution points were replaced with other
-  rounds' real, valid points and the hash chain recomputed to be
-  internally self-consistent, so bookkeeping alone could not catch it —
-  rejected by the **pairing-ratio check itself**
-  (`"new delta_g1/delta_g2 are not old delta_g1/delta_g2 raised to the
-  published contribution scalar"`), confirming the verification is
-  cryptographic, not hash bookkeeping.
-- `circuit/` builds clean (`setup`, `prove`, `verify_smoke`,
-  `verify_prove2`, oracles). The full pipeline was run in a scratch dir:
-  `setup` writes the keypair, `prove` emits a JSON proof, `verify_smoke`
-  reports `false / true / false` for the inconsistent/consistent/tampered
-  cases exactly as documented, and `verify_prove2` (second leaf,
-  non-zero sibling, `is_right=true`) reports `true` with the forged
-  nullifier rejected `false`. Every accept/reject claim in the README's
-  circuit status row is now reproduced by actually running the compiled
-  binaries.
-- Note on test counts: `cargo test` reports 0 tests in both crates —
-  the differential coverage this repo claims lives in the oracle
-  binaries (`oracle_alphabeta`, `oracle_subgroup_jacobian`,
-  `oracle_pin_fixture`) and the Motoko-side fixture harness
-  (`verify_test`/`wire_export.json`), not in Rust unit tests, and the CI
-  workflow exercises the pipeline bins with hard output assertions.
+`.github/workflows/ci.yml` now exists and runs on every push/PR: builds
+and tests both Rust crates, runs the full `setup → prove → verify_smoke →
+verify_prove2` pipeline with hard accept/reject assertions, `dfx build`s
+the Motoko side, and deploys to a real local replica to re-run the
+leaf-update, throttle/anonymous, and upgrade-safety regressions from this
+document. Every step was hand-validated against a real `dfx 0.32.0` +
+bundled `moc 1.4.1`/`pocket-ic` in this session before being written into
+the workflow — not written speculatively. (Getting `dfx` at all required
+pulling its release tarball directly from
+`github.com/dfinity/sdk/releases`, since the installer script's usual
+host wasn't reachable from this sandbox; the workflow does the same.)
 
-## Follow-up: CI
+Also confirmed while doing this: `package_flags.sh`'s recorded provenance
+hashes for `base`/`core` in `mops.lock.json` are independently
+reproducible — pulled both packages fresh via `codeload.github.com` and
+the bundled `node-motoko` core package, hashed them with the exact
+algorithm `tree_hash()` in `package_flags.sh` uses, and both matched
+byte-for-byte.
 
-`.github/workflows/ci.yml` re-runs the verification claims on every
-push/PR — the circuit verification pipeline (`setup → prove →
-verify_smoke → verify_prove2`, with hard accept/reject assertions),
-`cargo build`/tests for the `ceremony` crate, `dfx build` for the Motoko
-side through `package_flags.sh` (which fails loudly if the pinned
-base/core hashes drift from `mops.lock.json`), and a `replica-smoke` job
-that deploys `title_registry` on a local replica and runs the leaf-update
-regression (resubmit must keep the same `leafIndex` while `root` changes;
-unknown property must return `null`). The first CI run doubles as the
-ongoing re-check of the typecheck and replica results documented in the
-Verified section above.
+### Multi-party trusted setup — simulated end-to-end, not performed
+
+`ceremony_init` → `ceremony_contribute` (×3, simulated participants) →
+`ceremony_verify` were run for real in this session and the chain
+verifies. Two tamper tests were run against the *real* verifier: (1)
+flipping a byte in an intermediate round's proving-key file — caught
+immediately via the file-hash check; (2) a harder test — forging round
+2's public `delta_g1`/`delta_g2`/contribution values to a different
+round's (valid-looking, well-formed) values, then *correctly
+recomputing* the transcript's hash-chain fields so the bookkeeping layer
+alone couldn't catch it — and `ceremony_verify` still rejected it, with
+`"new delta_g1/delta_g2 are not old delta_g1/delta_g2 raised to the
+published contribution scalar"`. That confirms the verifier is checking
+the actual pairing relation between rounds, not just file/hash
+bookkeeping.
+
+**What this does and does not establish:** it proves the ceremony
+tooling is mechanically correct and that forgery is actually detected —
+genuinely useful, since untested crypto tooling is a real risk on its
+own. It does **not** constitute a trusted setup, and it would be actively
+misleading to represent it as progress toward one: every round in this
+simulation was run by the same party (this session), which means a
+single party holds the full transcript of "toxic waste" that the whole
+point of a multi-party ceremony is to make no single party hold. Per
+`CEREMONY_SPEC.md`, the security property here is structural — it comes
+from real, independent, non-colluding participants each contributing
+genuine private randomness and provably destroying it — and no amount of
+running the same binaries in one sandbox can produce that property. This
+item stays open until real participants run it.
+
+### Independent audit — a supplementary adversarial pass was done, not an audit
+
+A deeper review of the crypto-sensitive code was done as a genuine,
+adversarial second look — but it does not satisfy this checklist item,
+for two structural reasons: this reviewer already worked on this
+codebase (not independent), and lacks the specialized cryptographic
+audit tooling/process a real audit firm would bring (no substitute for
+one). Flagging findings honestly rather than either skipping the check
+or overstating what it is:
+
+- `circuit/src/lib.rs`'s constraint logic was read end-to-end.
+  `enforce_greater_than`'s range-check-based comparison gadget (used for
+  `license_expiry > current_timestamp`) was hand-verified algebraically
+  and checks out for the 64-bit range it's used at. Public-input
+  allocation order in the circuit
+  (`registry_id, merkle_root, purpose, request_nonce, current_timestamp,
+  nullifier`) matches `main.mo`'s `verify()` order exactly — a mismatch
+  here would be a silent, severe bug, and there isn't one. Domain
+  separation tags are small distinct constants absorbed as the first
+  Poseidon input in every hash role, consistent with the stated design.
+- `Groth16Multi.mo`'s `verify`/`verifyWithFlat` validates proof points
+  A, B, C (canonical encoding, on-curve, correct subgroup) before any
+  pairing work, and reduces public inputs mod the scalar field order
+  before the `vk_x` MSM (`inputs[i] % C.R`) — both are exactly the
+  checks whose absence is a classic Groth16-verifier soundness bug
+  class, and both are present. `TitleGroth16.mo` was confirmed to be a
+  genuinely thin adapter with no cryptography of its own, as its own
+  doc comment claims.
+- Not reviewed in this pass: the ~4,000 remaining lines of vendored
+  field/curve/pairing arithmetic (`Fp*.mo`, `Tower*.mo`, `Curve*.mo`,
+  `Pairing*.mo`) — the differential tests already in the repo
+  (`Groth16MultiTest.mo`, `verify_smoke`, `verify_prove2`) are the real
+  coverage there, and this pass didn't re-derive or re-check that math
+  independently.
+- Already self-flagged by this codebase, and not re-litigated here:
+  `poseidon_config()` in `circuit/src/lib.rs` generates Poseidon round
+  constants at runtime rather than using fixed, published, reviewed
+  parameters — the code's own comment says not to deploy with these as
+  they are, and that's still accurate.
+
+No vulnerabilities were found in the code actually reviewed. That is
+meaningfully different from "this code has been audited" — treat it as
+one more (careful) set of eyes, not as clearing this checklist item.
+
+### One more gap closed along the way: `Groth16MultiTest.mo` actually run
+
+That file's own header said it was "written and pinned against a real,
+independently-computed oracle value, but NOT executed... that is the one
+remaining honest gap in this patch's verification story" — its `run()`
+was too expensive even for the JS-interpreted `moc` fallback used when
+`dfx` isn't available. With real `dfx`/`pocket-ic` access in this
+session, this got closed for real: `run()` itself turned out to exceed
+even a real update call's instruction budget (~5x a single `verify()`'s
+pairing work in one message), so it was split into six separate
+messages — `groth16_test/main.mo`, deployed live — each costing about
+what one real `TitleRegistry.verify()` call costs. All six passed on a
+live replica:
+
+```
+prepareVk                              -> true
+alphaBetaTargetMatchesOracle           -> true
+validRawIntermediateMatchesOracle      -> true
+forgedRawIntermediateMatchesOracle     -> true
+acceptsValidProof                      -> true
+rejectsForgedProof                     -> true
+```
+
+That's the alpha/beta precompute, both raw 3-pair Miller intermediates
+(valid and forged), and the fully-assembled verifier's ACCEPT/REJECT
+verdict, all independently byte-diffed against arkworks — for real, on a
+real replica, not asserted. `.github/workflows/ci.yml`'s
+`groth16-differential` job now re-runs this same six-call sequence on
+every push/PR.
+

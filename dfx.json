@@ -7,6 +7,10 @@
     "verify_test": {
       "type": "motoko",
       "main": "verify_test/main.mo"
+    },
+    "groth16_test": {
+      "type": "motoko",
+      "main": "groth16_test/main.mo"
     }
   },
   "defaults": {

@@ -12,13 +12,19 @@
 /// normal form with the existing public `FpM.montMul` (no source changes needed) before
 /// comparing against arkworks' canonical (normal-form) values.
 ///
-/// STATUS: written and pinned against a real, independently-computed oracle value, but NOT
-/// executed in the sandbox that produced this patch — the JS-interpreted `moc` this project
-/// falls back to when `dfx` is unavailable is documented (see `verify_test/main.mo`) as too
-/// slow to finish even the OLD 4-pair pairing (killed after 17+ minutes); this NEW path is
-/// ~19% cheaper in the Miller loop but not enough to change that. Needs `dfx`/`pocket-ic`
-/// (or a working compiled-wasm execution path) to actually run. That is the one remaining
-/// honest gap in this patch's verification story.
+/// STATUS: written and pinned against a real, independently-computed oracle value.
+/// Originally not executed (no dfx/pocket-ic access in the sandbox that wrote it — the
+/// JS-interpreted `moc` fallback is too slow to finish even one pairing, documented in
+/// `verify_test/main.mo`). Since closed: run for real on a live `dfx`/`pocket-ic` replica via
+/// `groth16_test/main.mo` (a thin actor wrapper, since `run()` below does ~5x a single
+/// verify()'s pairing work in one call and exceeds a single message's instruction budget even
+/// as an update call — the wrapper splits it into `parseVkForTest`/`checkAlphaBetaTarget`/
+/// `checkValidRaw`/`checkForgedRaw`/`checkAcceptValid`/`checkRejectForged`, each costing about
+/// one real `verify()` call). All checks passed: alphaBetaTarget, the valid AND forged raw
+/// 3-pair intermediates, and the full assembled verify's ACCEPT/REJECT verdict all matched the
+/// independently-computed oracle. See PATCH_NOTES-leaf-update-and-hardening.md for the session
+/// log. `run()` itself is kept below as the original single-call reference — correct, just not
+/// directly callable within one message's instruction budget on real infrastructure.
 
 import GW "./vendor/Groth16Wire";
 import GM "./vendor/Groth16Multi";
@@ -150,5 +156,44 @@ module {
           and acceptForged != "ACCEPT";
       };
     };
+  };
+
+  // ---- split entry points ----
+  // `run()` above does ~5x a single verify()'s pairing work in one call
+  // (vk prep + 2 raw Miller computations + 2 full verifies), which exceeds
+  // a single message's instruction budget on a real replica even as an
+  // update call — confirmed empirically, not assumed. These let a caller
+  // spread the same assertions across several messages, each costing
+  // roughly what one real `TitleRegistry.verify()` call costs.
+  public type TestVk = GM.PreparedVk;
+
+  public func parseVkForTest() : ?TestVk {
+    GW.parseAndPrepareVk(vkHex);
+  };
+
+  public func checkAlphaBetaTarget(vk : TestVk) : Bool {
+    eq12(flatten(vk.alphaBetaTarget), targetCoeffs());
+  };
+
+  public func checkValidRaw(vk : TestVk) : Bool {
+    switch (rawVerifyOutput(vk, proofHex, inputsHex)) {
+      case (?out) { eq12(out, validOutCoeffs()) };
+      case (null) { false };
+    };
+  };
+
+  public func checkForgedRaw(vk : TestVk) : Bool {
+    switch (rawVerifyOutput(vk, proofHex, forgedInputsHex)) {
+      case (?out) { eq12(out, forgedOutCoeffs()) };
+      case (null) { false };
+    };
+  };
+
+  public func checkAcceptValid(vk : TestVk) : Bool {
+    GW.verifyPrepared(vk, proofHex, inputsHex) == "ACCEPT";
+  };
+
+  public func checkRejectForged(vk : TestVk) : Bool {
+    GW.verifyPrepared(vk, proofHex, forgedInputsHex) != "ACCEPT";
   };
 };
